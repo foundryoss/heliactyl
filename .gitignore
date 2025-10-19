@@ -8,6 +8,9 @@ node_modules/
 **/.cache/
 **/.tsbuildinfo
 
+# db
+server/data/
+
 # Editor/OS files
 .DS_Store
 .idea/
