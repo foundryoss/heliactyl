@@ -43,6 +43,9 @@ oauth:
     scopes: ["identify", "email"]
 
 pterodactyl:
+  # Heliactyl supports both Pterodactyl and Skyport (v2+), via the Pterodactyl compatible API.
+  # It also supports all three daemons, Pterodactyl Wings, Cryogenic for Heliactyl and skyportd.
+  # You may have less features when using normal Wings, and you must set allowed-origins to *.
   url: https://panel.example.com
   apiKey: "REPLACE_WITH_API_KEY"
   clientKey: "REPLACE_WITH_CLIENT_KEY"
