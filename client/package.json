@@ -1,0 +1,46 @@
+{
+  "name": "@heliactyl/client",
+  "version": "15.0.0",
+  "private": true,
+  "type": "module",
+  "author": "Foundry Technologies Inc.",
+  "license": "LicenseRef-FOSL",
+  "scripts": {
+    "watch": "vite",
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --port 5174",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:mqtt": "vitest src/providers/__tests__/MQTTProvider.test.tsx"
+  },
+  "dependencies": {
+    "@heroicons/react": "2",
+    "@tailwindcss/vite": "^4.1.13",
+    "@types/ws": "^8.18.1",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
+    "aedes": "^0.51.3",
+    "mqtt": "^5.14.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.9.1",
+    "tailwindcss": "^4.1.13",
+    "websocket-stream": "^5.5.2",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.3",
+    "jsdom": "^27.0.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "vitest": "^3.2.4"
+  }
+}

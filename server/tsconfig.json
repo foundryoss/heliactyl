@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "lib": ["esnext", "dom"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "types": ["bun-types", "node"],
+    "baseUrl": ".",
+    "paths": {
+      "@types": ["../types"],
+      "@types/*": ["../types/*"],
+      "@server/*": ["./*"],
+      "@db/*": ["./db/*"],
+      "@modules/*": ["./modules/*"],
+      "@lib/*": ["./lib/*"]
+    }
+  },
+  "include": ["./**/*.ts", "../types/**/*.ts"]
+}
+
+

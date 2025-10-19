@@ -1,0 +1,28 @@
+# Node/Bun dependencies and build output
+node_modules/
+**/node_modules/
+**/dist/
+**/.turbo/
+**/.next/
+**/.vite/
+**/.cache/
+**/.tsbuildinfo
+
+# Editor/OS files
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Local configs and secrets
+server/config.yml
+*.local.*
+.env
+.env.*
+
+# Test coverage
+coverage/
+
+# AI
+.claude/
+
