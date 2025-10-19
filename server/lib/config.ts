@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import YAML from 'yaml';
 import type { ServerConfig } from '../../types/index';
 
-const CONFIG_PATH = resolve(process.cwd(), 'server', 'config.yml');
+const CONFIG_PATH = resolve(process.cwd(), 'config.yml');
 
 let cachedConfig: ServerConfig | null = null;
 

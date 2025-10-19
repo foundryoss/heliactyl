@@ -7,7 +7,7 @@ export interface ModuleLoaderResult {
   modules: HeliaModule[];
 }
 
-export async function loadModules(modulesDir = resolve(process.cwd(), 'server', 'modules')): Promise<ModuleLoaderResult> {
+export async function loadModules(modulesDir = resolve(process.cwd(), 'modules')): Promise<ModuleLoaderResult> {
   const modules: HeliaModule[] = [];
 
   async function collect(dir: string): Promise<void> {

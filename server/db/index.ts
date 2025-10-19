@@ -54,7 +54,7 @@ export async function createHeliaDB(cfg: ServerConfig): Promise<HeliaDB> {
     : 'postgres';
 
   async function migrate() {
-    const schemaPath = resolve(process.cwd(), 'server', 'schema.yml');
+    const schemaPath = resolve(process.cwd(), 'schema.yml');
     let spec: SchemaSpec | null = null;
     try {
       const file = await readFile(schemaPath, 'utf8');
