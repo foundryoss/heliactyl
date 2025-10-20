@@ -1,9 +1,28 @@
 {
+  "cors": {
+    "allowCredentials": "false",
+    "origin": "*"
+  },
+  "database": {
+    "name": "Heli-db",
+    "password": "Heli-pw",
+    "type": "monogo"
+  },
+  "jobs": {
+    "eggSyncIntervalMinutes": "10",
+    "enabled": "true",
+    "reconcileIntervalMinutes": "30",
+    "startupRun": "true"
+  },
   "key": "4c0b419d-9e1d-4e48-932d-563666e7bd45",
   "node": "Heli-dev",
   "port": "3500",
   "ratelimit": {
     "permin": "120",
     "persec": "12"
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": "8787"
   }
 }

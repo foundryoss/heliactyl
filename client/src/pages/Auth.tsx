@@ -160,15 +160,15 @@ export function AuthPage() {
                     </div>
                     {/* Footer */}
                     <div className="mt-6 text-center text-xs text-gray-500">
-                        <div>© 2024 - 2025 Altare Technologies Inc.</div>
+                        <div>© 2024 - 2025 Nadhi.dev & Altare Technologies Inc.</div>
                         <div className="mt-1 relative inline-grid place-items-center whitespace-nowrap leading-none group">
                             {/* Invisible sizer to reserve space for full text so it doesn't wrap or jump */}
-                            <span className="invisible">Powered by Heliactyl Next 15 (Manhattan)</span>
+                            <span className="invisible">Powered by Heliactyl-RS Next 15 (Manhattan)</span>
                             {/* Default, short label */}
                             <span className="col-start-1 row-start-1 z-0 blur-0 transition duration-300 group-hover:opacity-0 group-hover:blur-sm">Powered by Heliactyl</span>
                             {/* Hover, full label */}
                             <span className="col-start-1 row-start-1 z-10 opacity-0 filter-none transition-opacity duration-300 group-hover:opacity-100">
-                                Powered by Heliactyl Next 15 (Manhattan)
+                                Powered by Heliactyl-RS Next 15 (Manhattan)
                             </span>
                         </div>
                     </div>

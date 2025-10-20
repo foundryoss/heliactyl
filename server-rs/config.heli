@@ -1,6 +1,22 @@
 {
     node = {Heli-dev},
     key = {4c0b419d-9e1d-4e48-932d-563666e7bd45},
+    server = {
+        host = {0.0.0.0},
+        port = {8787},
+    },
     port = {3500},
     ratelimit = {persec = {12}, permin = {120}},
+    cors = {origin = {*}, allowCredentials = {false} },
+    jobs = {
+        enabled = {true}, 
+        startupRun = {true}, 
+        eggSyncIntervalMinutes = {10}, 
+        reconcileIntervalMinutes = {30}  
+    },
+    database = {
+        name = {Heli-db},
+        password = {Heli-pw},
+        type = {monogo} 
+    },
 }
