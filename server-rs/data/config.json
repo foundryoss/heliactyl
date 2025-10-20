@@ -1,0 +1,9 @@
+{
+  "key": "4c0b419d-9e1d-4e48-932d-563666e7bd45",
+  "node": "Heli-dev",
+  "port": "3500",
+  "ratelimit": {
+    "permin": "120",
+    "persec": "12"
+  }
+}

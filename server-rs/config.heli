@@ -1,0 +1,6 @@
+{
+    node = {Heli-dev},
+    key = {4c0b419d-9e1d-4e48-932d-563666e7bd45},
+    port = {3500},
+    ratelimit = {persec = {12}, permin = {120}},
+}

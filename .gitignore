@@ -27,5 +27,39 @@ server/config.yml
 coverage/
 
 # AI
-.claude/
+#.claude/ <- Using claude code :vomit:
 
+# Rust build artifacts
+/target/
+**/target/
+**/*.rs.bk
+
+# Rust package manager files
+Cargo.lock
+.cargo/
+
+# Rust documentation
+**/doc/
+
+# Rust test output
+**/test-outputs/
+
+# Rust coverage tools
+**/coverage/
+**/lcov.info
+
+# Rust IDE/editor files
+*.rs.bk
+*.iml
+*.swp
+*.swo
+*.swn
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Rust debugging tools
+*.dSYM/
+*.profraw
+*.profdata
