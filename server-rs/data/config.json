@@ -4,8 +4,13 @@
     "origin": "*"
   },
   "database": {
+    "ip": {},
     "name": "Heli-db",
     "password": "Heli-pw",
+    "redis": {
+      "host": "127.0.0.1",
+      "port": "6379"
+    },
     "type": "monogo"
   },
   "jobs": {
@@ -14,7 +19,7 @@
     "reconcileIntervalMinutes": "30",
     "startupRun": "true"
   },
-  "key": "4c0b419d-9e1d-4e48-932d-563666e7bd45",
+  "key": "977540a5-f2c9-491d-bccc-6525072d7921",
   "node": "Heli-dev",
   "port": "3500",
   "ratelimit": {
@@ -24,5 +29,8 @@
   "server": {
     "host": "0.0.0.0",
     "port": "8787"
+  },
+  "uptime": {
+    "file": "data/uptime.json"
   }
 }

@@ -1,7 +1,6 @@
 # Node/Bun dependencies and build output
 node_modules/
 **/node_modules/
-**/dist/
 **/.turbo/
 **/.next/
 **/.vite/

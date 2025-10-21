@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Heliactyl</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+		<link href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Space+Grotesk:wght@300..700&family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+
+
+		<!--
+		  So what did it even mean to be accepted by the scene
+          And judge your worth in magazines
+          And lend your life to ketamine
+		-->
+		<script type="module" crossorigin src="/assets/index-BsMOM7C7.js"></script>
+		<link rel="stylesheet" crossorigin href="/assets/index-CHG9CFl5.css">
+	</head>
+    <body class="bg-gray-100 dark:bg-black" style="font-family: 'Geist', sans-serif;">
+        <script>
+            const theme = localStorage.getItem('theme')
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+            const resolved = theme === 'dark' || (!theme || theme === 'system') && prefersDark ? 'dark' : 'light'
+            document.documentElement.dataset.theme = resolved
+            document.documentElement.classList.toggle('dark', resolved === 'dark')
+        </script>
+        <div id="root"></div>
+    </body>
+</html>
+
