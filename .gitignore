@@ -10,6 +10,9 @@ node_modules/
 # db
 server/data/
 
+# stupid ts server
+server/
+
 # Editor/OS files
 .DS_Store
 .idea/
@@ -57,6 +60,7 @@ Cargo.lock
 *.bak
 *.orig
 *.rej
+
 
 # Rust debugging tools
 *.dSYM/
