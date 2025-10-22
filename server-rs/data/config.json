@@ -21,6 +21,10 @@
   },
   "key": "977540a5-f2c9-491d-bccc-6525072d7921",
   "node": "Heli-dev",
+  "petro": {
+    "api_key": {},
+    "url": {}
+  },
   "port": "3500",
   "ratelimit": {
     "permin": "120",

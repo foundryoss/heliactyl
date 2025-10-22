@@ -5,6 +5,10 @@
         host = {0.0.0.0},
         port = {8787},
     },
+    petro = {
+        url = {https://control.pkg.lat},
+        api_key = {nadhi_2ijxgVtT2wQWel646Ub7qeJMnR8UaRM8MKfWAOFq3Z},
+    },
     uptime = {
         file = {data/uptime.json},
     },
