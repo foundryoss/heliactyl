@@ -2,7 +2,7 @@ use redis::{Client, Commands, RedisError};
 use std::time::Duration;
 
 pub struct RedisClient {
-    client: Client,
+    pub client: Client,
 }
 
 impl RedisClient {

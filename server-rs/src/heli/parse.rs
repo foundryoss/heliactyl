@@ -60,6 +60,8 @@ impl HeliConfig {
     }
 }
 
+
+
 /// Parse .heli format into JSON
 fn parse_heli(content: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let mut json_str = content.to_string();
@@ -72,9 +74,14 @@ fn parse_heli(content: &str) -> Result<Value, Box<dyn std::error::Error>> {
     // Replace = with :
     json_str = json_str.replace(" = ", ": ");
 
+    // Add commas between object entries that are missing them
+    let re_missing_commas = regex::Regex::new(r#"([\\"\}])\s*\n\s*([a-zA-Z0-9_\-]+\s*[:=])"#).unwrap();
+    json_str = re_missing_commas.replace_all(&json_str, "$1,\n$2").to_string();
+
     // Replace {value} with "value" for string/number values, but keep nested objects as is
-    let re_val = regex::Regex::new(r"\{([^{}]+)\}").unwrap();
-    json_str = re_val.replace_all(&json_str, "\"$1\"").to_string();
+    // This is a more careful regex that won't match on nested objects
+    let re_val = regex::Regex::new(r":\s*\{([^{}\n]+)\}").unwrap();
+    json_str = re_val.replace_all(&json_str, ": \"$1\"").to_string();
 
     // Replace keys without quotes with quoted keys
     let re = regex::Regex::new(r#"(\s*)([a-zA-Z0-9_\-]+)\s*:"#).unwrap();
@@ -90,9 +97,21 @@ fn parse_heli(content: &str) -> Result<Value, Box<dyn std::error::Error>> {
         .collect();
 
     // Parse as JSON
-    let data: Value = serde_json::from_str(&json_str)?;
+    let data: Value = match serde_json::from_str(&json_str) {
+        Ok(data) => data,
+        Err(e) => {
+            // For debugging - write the transformed JSON to a file
+            let _ = fs::write("data/debug_transformed.json", &json_str);
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to parse .heli format: {} - Debug JSON written to data/debug_transformed.json", e)
+            )));
+        }
+    };
+    
     Ok(data)
 }
+
 
 /// Replace auto-generation directives in the .heli file itself
 fn replace_auto_generation_in_heli(content: &str) -> String {
@@ -124,8 +143,6 @@ fn replace_auto_generation_in_heli(content: &str) -> String {
     
     result
 }
-
-
 
 /// Generate random text
 fn generate_random_text(length: usize) -> String {

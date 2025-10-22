@@ -1,40 +1,42 @@
 {
-  "cors": {
-    "allowCredentials": "false",
-    "origin": "*"
-  },
-  "database": {
-    "ip": {},
-    "name": "Heli-db",
-    "password": "Heli-pw",
-    "redis": {
-      "host": "127.0.0.1",
-      "port": "6379"
-    },
-    "type": "monogo"
-  },
-  "jobs": {
-    "eggSyncIntervalMinutes": "10",
-    "enabled": "true",
-    "reconcileIntervalMinutes": "30",
-    "startupRun": "true"
-  },
-  "key": "977540a5-f2c9-491d-bccc-6525072d7921",
   "node": "Heli-dev",
-  "petro": {
-    "api_key": {},
-    "url": {}
-  },
-  "port": "3500",
-  "ratelimit": {
-    "permin": "120",
-    "persec": "12"
-  },
+  "key": "977540a5-f2c9-491d-bccc-6525072d7921",
   "server": {
     "host": "0.0.0.0",
     "port": "8787"
   },
+  "petrodactyl": {
+    "url": "control.pkg.lat",
+    "api_key": "nadhi_2ijxgVtT2wQWel646Ub7qeJMnR8UaRM8MKfWAOFq3Z"
+  },
   "uptime": {
     "file": "data/uptime.json"
+  },
+  "port": "3500",
+  "ratelimit": {
+    "persec": "12",
+    "permin": "120"
+  },
+  "cors": {
+    "origin": "*",
+    "allowCredentials": "false"
+  },
+  "jobs": {
+    "enabled": "true",
+    "startupRun": "true",
+    "eggSyncIntervalMinutes": "10",
+    "reconcileIntervalMinutes": "30"
+  },
+  "database": {
+    "name": "Heli-db",
+    "username": "mongo",
+    "password": "mongo",
+    "type": "mongodb",
+    "host": "cluster0.uijo33u.mongodb.net",
+    "port": "27017"
+  },
+  "redis": {
+    "host": "127.0.0.1",
+    "port": "6379"
   }
 }

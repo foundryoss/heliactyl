@@ -12,6 +12,7 @@ server/data/
 
 # stupid ts server
 server/
+server-rs/config.heli
 
 # Editor/OS files
 .DS_Store
@@ -34,6 +35,7 @@ coverage/
 
 # Rust build artifacts
 /target/
+data
 **/target/
 **/*.rs.bk
 
@@ -67,3 +69,4 @@ Cargo.lock
 *.dSYM/
 *.profraw
 *.profdata
+server-rs/config.heli
