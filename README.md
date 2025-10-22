@@ -1,4 +1,4 @@
-![Alt text](https://i.ibb.co/Cp2Sw9RT/Heliactyl-rs.png "Heliactyl-rs")
+![Alt text](https://i.ibb.co/chLqmJxp/Heliactyl-rs-1.png "Heliactyl-rs")
 
 ## Heliactyl-rs
 
