@@ -28,10 +28,16 @@ server/config.yml
 
 # Test coverage
 coverage/
+tests/
+
+# Ignore config.heli file
+server-rs/config.heli
+**/config.heli
+server-rs/test
 
 # AI
-#.claude/ <- Using claude code :vomit:
-# .kiro/ <- Using kiro code :vomit:
+.claude/ 
+
 
 # Rust build artifacts
 /target/

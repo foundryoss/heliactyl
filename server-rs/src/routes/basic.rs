@@ -12,6 +12,7 @@ use crate::{env, heli, json::json::{key_value, rs}};
 
 
 
+
 pub async fn root() -> impl IntoResponse {
     // Define the path to the index.html file
     let index_path = "./data/dist/index.html";
@@ -28,13 +29,13 @@ pub async fn root() -> impl IntoResponse {
 }
 
 pub async fn serve_asset(Path(file): Path<String>) -> impl IntoResponse {
-    println!("Requested asset file: {}", file); // Debug: Print the requested file name
+   // println!("Requested asset file: {}", file); // Debug: Print the requested file name
 
     // Define the path to the assets folder
     let asset_path = PathBuf::from(format!("./data/dist/assets/{}", file));
 
     // Debug: Print the constructed file path
-    println!("Serving asset: {:?}", asset_path);
+    //println!("Serving asset: {:?}", asset_path);
 
     // Read the file contents
     match read(&asset_path).await {

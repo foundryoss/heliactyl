@@ -5,8 +5,8 @@
         host = {0.0.0.0},
         port = {8787},
     },
-    petro = {
-        url = {https://control.pkg.lat},
+    petrodactyl = {
+        url = {control.pkg.lat},
         api_key = {nadhi_2ijxgVtT2wQWel646Ub7qeJMnR8UaRM8MKfWAOFq3Z},
     },
     uptime = {
@@ -26,12 +26,15 @@
     },
     database = {
         name = {Heli-db},
-        password = {Heli-pw},
-        type = {monogo},
-        ip = {},
-        redis = {
-            host = {127.0.0.1},
-            port = {6379}
-        }
+        username = {mongo},
+        password = {mongo},
+        type = {mongodb},
+        host = {cluster0.uijo33u.mongodb.net},
+        port = {27017},
+    },
+    redis = {
+        host = {127.0.0.1},
+        port = {6379}
     },
 }
+

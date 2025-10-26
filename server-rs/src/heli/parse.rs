@@ -58,6 +58,31 @@ impl HeliConfig {
             v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
         })
     }
+
+    /// Get servers configuration
+    pub fn get_servers(&self) -> Option<std::collections::HashMap<String, ServerConfig>> {
+        let servers_obj = self.get("servers")?;
+        let obj = servers_obj.as_object()?;
+        
+        let mut servers = std::collections::HashMap::new();
+        
+        for (name, config) in obj.iter() {
+            let host = config.get("host")?.as_str()?.to_string();
+            let port = config.get("port")?
+                .as_i64()
+                .or_else(|| config.get("port")?.as_str()?.parse::<i64>().ok())? as u16;
+            
+            servers.insert(name.clone(), ServerConfig { host, port });
+        }
+        
+        Some(servers)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
 }
 
 

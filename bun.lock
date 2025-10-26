@@ -1,7 +1,11 @@
 {
   "lockfileVersion": 1,
   "workspaces": {
-    "": {},
+    "": {
+      "dependencies": {
+        "ws": "^8.18.3",
+      },
+    },
     "client": {
       "name": "@heliactyl/client",
       "version": "15.0.0",

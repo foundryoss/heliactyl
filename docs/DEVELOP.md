@@ -22,5 +22,11 @@ Make it as simple as creating a file
             // Backends
     }
 }
-Helia will automatically spread the load across multiple nodes. 
+Helia will automatically spread the load across multiple nodes.
+
+
+Endpoints to finish
+
+/api/me
+/api/tenenats
 

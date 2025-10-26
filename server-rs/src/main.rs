@@ -12,6 +12,7 @@ mod database;
 mod auth;
 mod models;
 mod oauth;
+mod loadbalancer;
 
 // our mods
 use crate::{env::uptime, json::json::{key_value, rs}};
@@ -24,9 +25,20 @@ use colorized::{Color, Colors, colorize_println};
 #[tokio::main]
 async fn main() {
     welcome().await;
+   tracing_subscriber::fmt()
+    .with_max_level(tracing::Level::INFO)
+    .init();
     
-    // Read the config.heli file
-    let heli_config = heli::parse::HeliConfig::parse("./config.heli").expect("Failed to parse config.heli");
+    // Read the config.heli file (allow override via --config argument)
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = if args.len() > 2 && args[1] == "--config" {
+        &args[2]
+    } else {
+        "./config.heli"
+    };
+    
+    let heli_config = heli::parse::HeliConfig::parse(config_path)
+        .expect(&format!("Failed to parse config file: {}", config_path));
     
     // Connect to MongoDB - check for environment variable first
     let mongo_uri = if let Ok(env_uri) = std::env::var("MONGODB") {
@@ -99,23 +111,108 @@ async fn main() {
     let app_state = Arc::new(auth::oauth::AppState {
         mongo: Arc::new(mongo_client),
         jwt_secret,
-        session_manager,
+        session_manager: session_manager.clone(),
     });
 
-    // Build our application with routes
-    let app = Router::new()
-        .route("/", get(routes::basic::root))
-        .route("/assets/{file}", get(routes::basic::serve_asset))
-        .route("/api/", get(routes::api::root))
-        .route("/api/auth/register", axum::routing::post(auth::oauth::register))
-        .route("/api/auth/login", axum::routing::post(auth::oauth::login))
-        .route("/status", get(routes::basic::status))
-        .fallback(any(serve_index))
-        .layer(axum::middleware::from_fn(move |req, next| {
-            let limiter = rate_limiter.clone();
-            rate_limit_middleware(limiter, req, next)
-        }))
-        .with_state(app_state);
+    // Setup auth state for protected routes
+    let auth_state = Arc::new(middleware::auth::AuthState {
+        session_manager,
+        mongo: app_state.mongo.clone(),
+    });
+
+    // Check if load balancing is enabled
+    let servers_config = heli_config.get_servers();
+    let load_balancer_enabled = servers_config.is_some() && !servers_config.as_ref().unwrap().is_empty();
+
+    let app = if load_balancer_enabled {
+        colorize_println("Load Balancer Configuration:", Colors::BrightGreenFg);
+        
+        // Setup load balancer
+        let servers_map = servers_config.unwrap();
+        let mut backend_servers = Vec::new();
+        
+        for (name, config) in servers_map.iter() {
+            colorize_println(&format!("  -> Backend: {} ({}:{})", name, config.host, config.port), Colors::BrightCyanFg);
+            backend_servers.push(loadbalancer::BackendServer::new(
+                name.clone(),
+                config.host.clone(),
+                config.port,
+            ));
+        }
+        
+        let load_balancer = Arc::new(loadbalancer::LoadBalancer::new(
+            backend_servers,
+            loadbalancer::balancer::LoadBalancingStrategy::LeastConnections,
+        ));
+
+        // Start health checker
+        let health_checker = loadbalancer::health::HealthChecker::new(load_balancer.clone(), 10);
+        tokio::spawn(async move {
+            health_checker.start().await;
+        });
+
+        // Create load balancer stats route
+        let lb_clone = load_balancer.clone();
+        let stats_route = Router::new()
+            .route("/api/loadbalancer/stats", get(move || {
+                let lb = lb_clone.clone();
+                async move {
+                    let stats = lb.get_stats().await;
+                    axum::Json(stats)
+                }
+            }));
+
+        // WebSocket route
+        let lb_ws = load_balancer.clone();
+        let ws_route = Router::new()
+            .route("/ws", get(loadbalancer::websocket_proxy_handler))
+            .with_state(lb_ws);
+
+        // Proxy all other routes to backend servers
+        Router::new()
+            .merge(stats_route)
+            .merge(ws_route)
+            .fallback(loadbalancer::proxy_handler)
+            .with_state(load_balancer)
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let limiter = rate_limiter.clone();
+                rate_limit_middleware(limiter, req, next)
+            }))
+            .layer(tower_http::trace::TraceLayer::new_for_http())
+    } else {
+        colorize_println("Load Balancer: Disabled (no backend servers configured)", Colors::BrightYellowFg);
+        
+        // Protected routes that require authentication
+        let protected_routes = Router::new()
+            .route("/api/user/me", get(routes::user::get_me))
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state.clone(),
+                middleware::auth::auth_middleware
+            ))
+            .route("/api/tenants", get(routes::api::tenants))
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state.clone(),
+                middleware::auth::auth_middleware
+            ));
+
+        // Build our application with routes (normal mode)
+        Router::new()
+            .route("/", get(routes::basic::root))
+            .route("/assets/{file}", get(routes::basic::serve_asset))
+            .route("/api/", get(routes::api::root))
+            .route("/api/auth/register", axum::routing::post(auth::oauth::register))
+            .route("/api/auth/login", axum::routing::post(auth::oauth::login))
+            .route("/status", get(routes::basic::status))
+            .route("/ws", get(routes::websocket::websocket_handler))
+            .merge(protected_routes)
+            .fallback(any(serve_index))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let limiter = rate_limiter.clone();
+                rate_limit_middleware(limiter, req, next)
+            }))
+            .with_state(app_state)
+            .layer(tower_http::trace::TraceLayer::new_for_http())
+    };
     let host = heli_config.get_string("server.host").unwrap_or("0.0.0.0".to_string()); // Default to 0.0.0.0 if not specified
     let port = heli_config.get_int("server.port").unwrap_or(3000); // Default to 3000 if not specified
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port)).await.unwrap();

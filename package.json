@@ -11,5 +11,8 @@
     "dev:server": "cd server && bun run dev",
     "dev:client": "cd client && bun run watch",
     "test": "cd server && bun run test"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
   }
 }
