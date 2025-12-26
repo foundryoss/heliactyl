@@ -2,7 +2,7 @@ use axum::{
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use mongodb::bson::{doc, oid::ObjectId};
 use serde_json::json;

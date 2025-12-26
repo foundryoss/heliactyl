@@ -1,13 +1,15 @@
 {
   "node": "Heli-dev",
   "key": "977540a5-f2c9-491d-bccc-6525072d7921",
+  "max_tenats": "10",
   "server": {
     "host": "0.0.0.0",
     "port": "8787"
   },
-  "petrodactyl": {
-    "url": "control.pkg.lat",
-    "api_key": "nadhi_2ijxgVtT2wQWel646Ub7qeJMnR8UaRM8MKfWAOFq3Z"
+  "daemon": {
+    "host": "localhost",
+    "port": "8083",
+    "api_key": "pkg-lat-daemon-token-2024"
   },
   "uptime": {
     "file": "data/uptime.json"
@@ -24,19 +26,40 @@
   "jobs": {
     "enabled": "true",
     "startupRun": "true",
-    "eggSyncIntervalMinutes": "10",
+    "containerSyncIntervalMinutes": "10",
     "reconcileIntervalMinutes": "30"
   },
   "database": {
     "name": "Heli-db",
-    "username": "mongo",
-    "password": "mongo",
+    "username": "admin",
+    "password": "adminpass",
     "type": "mongodb",
-    "host": "cluster0.uijo33u.mongodb.net",
+    "host": "141.148.198.171",
     "port": "27017"
   },
   "redis": {
     "host": "127.0.0.1",
     "port": "6379"
+  },
+  "packages": {
+    "defaultPackage": "free",
+    "free": {
+      "memory_mb": "2048",
+      "disk_mb": "10240",
+      "cpu_percent": "100",
+      "server_slots": "2"
+    },
+    "basic": {
+      "memory_mb": "4096",
+      "disk_mb": "20480",
+      "cpu_percent": "200",
+      "server_slots": "5"
+    },
+    "premium": {
+      "memory_mb": "8192",
+      "disk_mb": "51200",
+      "cpu_percent": "400",
+      "server_slots": "10"
+    }
   }
 }

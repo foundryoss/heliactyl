@@ -2,7 +2,7 @@ use axum::{
     extract::{ws::WebSocket, WebSocketUpgrade},
     response::Response,
 };
-use futures_util::StreamExt;
+
 
 /// WebSocket echo handler for testing
 pub async fn websocket_handler(ws: WebSocketUpgrade) -> Response {

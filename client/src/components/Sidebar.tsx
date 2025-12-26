@@ -26,7 +26,8 @@ import {
     MoonIcon,
     ComputerDesktopIcon,
     ArrowsRightLeftIcon,
-    WalletIcon
+    WalletIcon,
+    CurrencyDollarIcon
 } from '@heroicons/react/24/outline'
 import { ChevronRightIcon } from '@heroicons/react/16/solid'
 
@@ -117,8 +118,9 @@ export function Sidebar() {
 
                         <span className="text-[10px] font-medium text-neutral-500 tracking-widest pb-2 dark:text-neutral-400 ml-2 mt-2" style={{ fontFamily: 'Space Mono, sans-serif' }}>ECONOMY</span>
                         <div className="w-full mt-1">
-                            <Link to="/wallet" className={linkClass('/wallet')}> <WalletIcon strokeWidth={2} className="h-4 w-4"/> <span>Wallet</span></Link>
+                            <Link to="/billing" className={linkClass('/billing')}> <CurrencyDollarIcon strokeWidth={2} className="h-4 w-4"/> <span>Billing</span></Link>
                         </div>
+                        <Link to="/wallet" className={linkClass('/wallet')}> <WalletIcon strokeWidth={2} className="h-4 w-4"/> <span>Wallet</span></Link>
                     </nav>
 
                     <div className="mt-auto space-y-1">

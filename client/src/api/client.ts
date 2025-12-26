@@ -63,9 +63,15 @@ export function createApi(baseUrl: string, getToken: () => string | null) {
 		},
 		servers: {
 			list: (tenantId: string) => request<{ items: any[] }>(`api/tenants/${tenantId}/servers`),
-			create: (tenantId: string, data: { name: string; eggId: number; memoryMb: number; diskMb: number; cpuPercent: number; location: string }) => request<{ id: string; pteroServerId: number; name: string }>(`api/tenants/${tenantId}/servers`, { method: 'POST', body: JSON.stringify(data) }),
+			create: (tenantId: string, data: { name: string; dockerImage: string; memoryMb: number; diskMb: number; cpuPercent: number; env: Record<string, string> }) => request<{ id: string; containerId: string; name: string; state: string; ports: any[] }>(`api/tenants/${tenantId}/servers`, { method: 'POST', body: JSON.stringify(data) }),
 			delete: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}`, { method: 'DELETE' }),
 			websocket: (tenantId: string, id: string) => request<{ token: string; socket: string }>(`api/tenants/${tenantId}/servers/${id}/websocket`),
+		},
+		billing: {
+			getTenantBilling: (tenantId: string) => request<{ tenantId: string; billing: any; balance: any }>(`api/tenants/${tenantId}/billing`),
+			getTransactions: (tenantId: string) => request<{ items: any[] }>(`api/tenants/${tenantId}/billing/transactions`),
+			addFunds: (tenantId: string, amount: number) => request<{ balance: number; currency: string }>(`api/tenants/${tenantId}/billing/add-funds`, { method: 'POST', body: JSON.stringify({ amount }) }),
+			getConfig: () => request<any>('api/billing/config'),
 		},
 		admin: {
 			users: () => request<{ items: any[] }>('api/admin/users'),

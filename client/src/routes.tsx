@@ -7,6 +7,7 @@ import { DashboardPage } from '@/pages/Dashboard'
 import { AccountPage } from '@/pages/Account'
 import { AdminPage } from '@/pages/Admin'
 import { WalletPage } from '@/pages/Wallet'
+import { BillingPage } from '@/pages/Billing'
 import React, { useEffect } from 'react'
 import { ServersPage } from '@/pages/Servers'
 import { ServerRoutes } from '@/pages/server'
@@ -82,6 +83,7 @@ export function AppRoutes() {
 					<Route index element={<DashboardPage />} />
                     <Route path="servers" element={<ServersPage />} />
                     <Route path="server/:serverId/*" element={<ServerRoutes />} />
+                    <Route path="billing" element={<BillingPage />} />
                     <Route path="wallet" element={<WalletPage />} />
 					<Route path="account" element={<AccountPage />} />
 					<Route path="admin" element={<AdminPage />} />

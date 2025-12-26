@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/Label'
 import { Select } from '@/components/ui/Select'
 import { Modal } from '@/components/ui/Modal'
 import Spinner from '@/components/ui/Spinner'
-import { PlusIcon, TrashIcon, CommandLineIcon, WifiIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, TrashIcon, CommandLineIcon } from '@heroicons/react/24/outline'
 import { useAlert } from '@/components/ui/Alert'
 
 export function ServersPage() {
@@ -26,8 +26,6 @@ export function ServersPage() {
     const liveUpdates = useTenantUpdates(selectedTenantId)
     
     const [servers, setServers] = useState<any[]>([])
-    const [locations, setLocations] = useState<any[]>([])
-    const [eggs, setEggs] = useState<any[]>([])
     const [resources, setResources] = useState<any>(null)
     const [error, setError] = useState<string | null>(null)
     const [loading, setLoading] = useState(false)
@@ -37,14 +35,13 @@ export function ServersPage() {
     const [serverToDelete, setServerToDelete] = useState<any>(null)
     const [deleting, setDeleting] = useState(false)
     
-    // Form state
+    // Form state - simplified for daemon
     const [formData, setFormData] = useState({
         name: '',
-        eggId: '',
-        memoryMb: '',
-        diskMb: '',
-        cpuPercent: '',
-        location: ''
+        dockerImage: 'nginx:alpine',
+        memoryMb: '512',
+        diskMb: '1024',
+        cpuPercent: '100'
     })
 
     const loadData = useCallback(async () => {
@@ -53,15 +50,8 @@ export function ServersPage() {
         setError(null)
         
         try {
-            const [serversRes, locationsRes, eggsRes] = await Promise.all([
-                api.servers.list(selectedTenantId),
-                api.core.locations(),
-                api.core.eggs()
-            ])
-            
+            const serversRes = await api.servers.list(selectedTenantId)
             setServers(serversRes.items || [])
-            setLocations(locationsRes.items || [])
-            setEggs(eggsRes.items || [])
         } catch (e: any) {
             setError(e?.message || 'Failed to load data')
         } finally {
@@ -70,7 +60,6 @@ export function ServersPage() {
     }, [api, selectedTenantId])
 
     const openCreateModal = async () => {
-        console.log('Opening create modal...')
         if (!selectedTenantId) return
         
         try {
@@ -80,24 +69,21 @@ export function ServersPage() {
             // Auto-fill with available resources
             setFormData({
                 name: '',
-                eggId: eggs.length > 0 ? eggs[0].eggId.toString() : '',
-                memoryMb: resourcesRes.remaining?.memoryMb?.toString() || '1024',
-                diskMb: resourcesRes.remaining?.diskMb?.toString() || '2048',
-                cpuPercent: resourcesRes.remaining?.cpuPercent?.toString() || '100',
-                location: locations.length > 0 ? locations[0].slug : ''
+                dockerImage: 'nginx:alpine',
+                memoryMb: Math.min(resourcesRes.remaining?.memoryMb || 512, 512).toString(),
+                diskMb: Math.min(resourcesRes.remaining?.diskMb || 1024, 1024).toString(),
+                cpuPercent: Math.min(resourcesRes.remaining?.cpuPercent || 100, 100).toString()
             })
             
             setShowCreateModal(true)
         } catch (e: any) {
             console.error('Failed to load resources:', e)
-            // Still show modal even if resources fail to load
             setFormData({
                 name: '',
-                eggId: eggs.length > 0 ? eggs[0].eggId.toString() : '',
-                memoryMb: '1024',
-                diskMb: '2048',
-                cpuPercent: '100',
-                location: locations.length > 0 ? locations[0].slug : ''
+                dockerImage: 'nginx:alpine',
+                memoryMb: '512',
+                diskMb: '1024',
+                cpuPercent: '100'
             })
             setShowCreateModal(true)
         }
@@ -117,8 +103,7 @@ export function ServersPage() {
             case 'server_created':
                 notify({ 
                     type: 'success', 
-                    description: `Server "${latestUpdate.data.name}" was created`,
-                    icon: <WifiIcon className="w-4 h-4" />
+                    description: `Server "${latestUpdate.data.name}" was created`
                 })
                 loadData() // Refresh server list
                 break
@@ -126,8 +111,7 @@ export function ServersPage() {
             case 'server_deleted':
                 notify({ 
                     type: 'info', 
-                    description: `A server was deleted`,
-                    icon: <WifiIcon className="w-4 h-4" />
+                    description: `A server was deleted`
                 })
                 loadData() // Refresh server list
                 break
@@ -136,8 +120,7 @@ export function ServersPage() {
             case 'member_removed':
                 notify({ 
                     type: 'info', 
-                    description: `Team membership was updated`,
-                    icon: <WifiIcon className="w-4 h-4" />
+                    description: `Team membership was updated`
                 })
                 break
         }
@@ -148,26 +131,50 @@ export function ServersPage() {
         if (!selectedTenantId) return
         
         setCreating(true)
+        
         try {
-            await api.servers.create(selectedTenantId, {
-                name: formData.name,
-                eggId: Number(formData.eggId),
-                memoryMb: Number(formData.memoryMb),
-                diskMb: Number(formData.diskMb),
-                cpuPercent: Number(formData.cpuPercent),
-                location: formData.location
+            const response = await fetch(`/api/tenants/${selectedTenantId}/servers`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    name: formData.name,
+                    dockerImage: formData.dockerImage,
+                    memoryMb: Number(formData.memoryMb),
+                    diskMb: Number(formData.diskMb),
+                    cpuPercent: Number(formData.cpuPercent),
+                    env: {}
+                })
             })
             
-            notify({ type: 'success', description: 'Server created successfully' })
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ error: 'Failed to create server' }))
+                throw new Error(errorData.error || 'Failed to create server')
+            }
+            
+            const result = await response.json()
+            console.log('Server creation started:', result)
+            
+            notify({ 
+                type: 'success', 
+                description: `Server "${result.name}" is being created. It will appear when ready.` 
+            })
+            
             setShowCreateModal(false)
-            setFormData({ name: '', eggId: '', memoryMb: '', diskMb: '', cpuPercent: '', location: '' })
+            setFormData({ name: '', dockerImage: 'nginx:alpine', memoryMb: '512', diskMb: '1024', cpuPercent: '100' })
+            
+            // Refresh server list to show "creating" state
             loadData()
+            
         } catch (e: any) {
             notify({ type: 'error', description: e?.message || 'Failed to create server' })
         } finally {
             setCreating(false)
         }
     }
+
 
     const handleDeleteClick = (server: any) => {
         setServerToDelete(server)
@@ -225,16 +232,16 @@ export function ServersPage() {
                                     Name
                                 </th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                                    Egg
+                                    Image
                                 </th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
                                     Resources
                                 </th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                                    Location
+                                    State
                                 </th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                                    Created
+                                    Ports
                                 </th>
                                 <th className="relative px-6 py-3">
                                     <span className="sr-only">Actions</span>
@@ -248,15 +255,12 @@ export function ServersPage() {
                                         <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
                                             {server.name}
                                         </div>
-                                        <div className="text-sm text-neutral-500 dark:text-neutral-400">
-                                            ID: {server.pteroServerId}
+                                        <div className="text-xs text-neutral-500 dark:text-neutral-400">
+                                            {server.containerId?.substring(0, 12) || 'N/A'}
                                         </div>
                                     </td>
-                                    <td className="px-6 py-4 whitespace-nowrap">
+                                    <td className="px-6 py-4">
                                         <div className="text-sm text-neutral-900 dark:text-neutral-100">
-                                            {eggs.find(e => e.eggId === server.eggId)?.name || `Egg ${server.eggId}`}
-                                        </div>
-                                        <div className="text-sm text-neutral-500 dark:text-neutral-400">
                                             {server.dockerImage}
                                         </div>
                                     </td>
@@ -264,17 +268,25 @@ export function ServersPage() {
                                         <div className="text-sm text-neutral-900 dark:text-neutral-100">
                                             {server.memoryMb}MB RAM
                                         </div>
-                                        <div className="text-sm text-neutral-500 dark:text-neutral-400">
+                                        <div className="text-xs text-neutral-500 dark:text-neutral-400">
                                             {server.diskMb}MB Disk • {server.cpuPercent}% CPU
                                         </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap">
-                                        <div className="text-sm text-neutral-900 dark:text-neutral-100">
-                                            {locations.find(l => l.id === server.locationId)?.name || `Location ${server.locationId}`}
-                                        </div>
+                                        <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                            server.state === 'running' 
+                                                ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+                                                : server.state === 'stopped'
+                                                ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
+                                                : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400'
+                                        }`}>
+                                            {server.state || 'unknown'}
+                                        </span>
                                     </td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-500 dark:text-neutral-400">
-                                        {new Date(server.createdAt).toLocaleDateString()}
+                                    <td className="px-6 py-4 whitespace-nowrap">
+                                        <div className="text-sm text-neutral-900 dark:text-neutral-100">
+                                            {server.ports?.map((p: any) => p.hostPort).join(', ') || 'None'}
+                                        </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                                         <div className="flex items-center gap-2 justify-end">
@@ -323,45 +335,24 @@ export function ServersPage() {
                             type="text"
                             value={formData.name}
                             onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                            placeholder="My Server"
+                            placeholder="my-server"
                             required
                         />
                     </div>
 
                     <div>
-                        <Label htmlFor="eggId">Egg</Label>
-                        <Select
-                            id="eggId"
-                            value={formData.eggId}
-                            onChange={(value) => setFormData({ ...formData, eggId: value })}
-                            options={[
-                                { value: '', label: 'Select an egg' },
-                                ...eggs.map((egg) => ({
-                                    value: egg.eggId.toString(),
-                                    label: `${egg.name} (${egg.dockerImage})`
-                                }))
-                            ]}
-                            placeholder="Select an egg"
+                        <Label htmlFor="dockerImage">Docker Image</Label>
+                        <Input
+                            id="dockerImage"
+                            type="text"
+                            value={formData.dockerImage}
+                            onChange={(e) => setFormData({ ...formData, dockerImage: e.target.value })}
+                            placeholder="nginx:alpine"
                             required
                         />
-                    </div>
-
-                    <div>
-                        <Label htmlFor="location">Location</Label>
-                        <Select
-                            id="location"
-                            value={formData.location}
-                            onChange={(value) => setFormData({ ...formData, location: value })}
-                            options={[
-                                { value: '', label: 'Select a location' },
-                                ...locations.map((location) => ({
-                                    value: location.slug,
-                                    label: location.name
-                                }))
-                            ]}
-                            placeholder="Select a location"
-                            required
-                        />
+                        <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                            Examples: nginx:alpine, node:18-alpine, python:3.11-slim
+                        </p>
                     </div>
 
                     <div className="grid grid-cols-3 gap-4">
@@ -370,9 +361,10 @@ export function ServersPage() {
                             <Input
                                 id="memoryMb"
                                 type="number"
+                                min="128"
                                 value={formData.memoryMb}
                                 onChange={(e) => setFormData({ ...formData, memoryMb: e.target.value })}
-                                placeholder="1024"
+                                placeholder="512"
                                 required
                             />
                         </div>
@@ -382,9 +374,10 @@ export function ServersPage() {
                             <Input
                                 id="diskMb"
                                 type="number"
+                                min="256"
                                 value={formData.diskMb}
                                 onChange={(e) => setFormData({ ...formData, diskMb: e.target.value })}
-                                placeholder="2048"
+                                placeholder="1024"
                                 required
                             />
                         </div>
@@ -394,6 +387,8 @@ export function ServersPage() {
                             <Input
                                 id="cpuPercent"
                                 type="number"
+                                min="10"
+                                max="400"
                                 value={formData.cpuPercent}
                                 onChange={(e) => setFormData({ ...formData, cpuPercent: e.target.value })}
                                 placeholder="100"
@@ -401,6 +396,17 @@ export function ServersPage() {
                             />
                         </div>
                     </div>
+
+                    {resources && (
+                        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-3">
+                            <p className="text-xs font-medium text-blue-900 dark:text-blue-100 mb-1">Available Resources</p>
+                            <p className="text-xs text-blue-700 dark:text-blue-300">
+                                RAM: {resources.remaining?.memoryMb || 0}MB • 
+                                Disk: {resources.remaining?.diskMb || 0}MB • 
+                                CPU: {resources.remaining?.cpuPercent || 0}%
+                            </p>
+                        </div>
+                    )}
 
                     <div className="flex justify-end gap-2 pt-4">
                         <Button

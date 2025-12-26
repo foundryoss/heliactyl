@@ -1,0 +1,18 @@
+#!/bin/bash
+# Heliactyl CLI wrapper script
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BINARY="$SCRIPT_DIR/target/release/server-rs"
+
+# Check if binary exists
+if [ ! -f "$BINARY" ]; then
+    echo "Binary not found. Building..."
+    cd "$SCRIPT_DIR" && cargo build --release
+    if [ $? -ne 0 ]; then
+        echo "Build failed!"
+        exit 1
+    fi
+fi
+
+# Run the binary with all arguments
+"$BINARY" "$@"

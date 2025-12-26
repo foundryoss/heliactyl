@@ -1,0 +1,14 @@
+{
+  "version": "0.3.0",
+  "port": 8070,
+  "key": "skyport-key",
+  "remote": "https://api.skyport.dev",
+  "mysql": {
+    "host": "localhost",
+    "user": "skyport",
+    "password": "password"
+  },
+  "volumes_path": "./volumes",
+  "storage_path": "./storage",
+  "available_ports": [25000, 25001, 25002, 25003, 25004]
+}

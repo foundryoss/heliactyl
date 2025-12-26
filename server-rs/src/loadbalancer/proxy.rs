@@ -1,8 +1,8 @@
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, Uri},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, StatusCode, Uri},
+    response::Response,
 };
 use std::sync::Arc;
 use super::balancer::LoadBalancer;

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use axum::{
     routing::{get, any},
     Router,
@@ -13,9 +12,12 @@ mod auth;
 mod models;
 mod oauth;
 mod loadbalancer;
+mod utils;
+mod cli;
+mod daemon;
 
 // our mods
-use crate::{env::uptime, json::json::{key_value, rs}};
+
 use crate::middleware::ratelimit::{RateLimiter, rate_limit_middleware};
 use axum::response::Html;
 use std::fs;
@@ -24,19 +26,33 @@ use colorized::{Color, Colors, colorize_println};
 
 #[tokio::main]
 async fn main() {
-    welcome().await;
-   tracing_subscriber::fmt()
-    .with_max_level(tracing::Level::INFO)
-    .init();
+    use clap::Parser;
     
-    // Read the config.heli file (allow override via --config argument)
-    let args: Vec<String> = std::env::args().collect();
-    let config_path = if args.len() > 2 && args[1] == "--config" {
-        &args[2]
-    } else {
-        "./config.heli"
-    };
+    // Parse CLI arguments
+    let cli = cli::Cli::parse();
     
+    match cli.command {
+        cli::Commands::Users(users_cmd) => {
+            // Handle user commands
+            if let Err(e) = cli::users::handle_users_command(users_cmd).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+            return;
+        }
+        cli::Commands::Serve { config } => {
+            // Continue with server startup
+            welcome().await;
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .init();
+            
+            start_server(&config).await;
+        }
+    }
+}
+
+async fn start_server(config_path: &str) {
     let heli_config = heli::parse::HeliConfig::parse(config_path)
         .expect(&format!("Failed to parse config file: {}", config_path));
     
@@ -106,12 +122,26 @@ async fn main() {
             .expect("Failed to create session manager")
     );
 
+    // Setup audit service
+    let audit_service = Arc::new(database::audit::AuditService::new(Arc::new(mongo_client.clone())));
+    colorize_println("  ✓ Audit service initialized", Colors::BrightGreenFg);
+
+    // Setup daemon client
+    let daemon_host = heli_config.get_string("daemon.host").unwrap_or("localhost".to_string());
+    let daemon_port = heli_config.get_int("daemon.port").unwrap_or(8083);
+    let daemon_api_key = heli_config.get_string("daemon.api_key").unwrap_or("pkg-lat-daemon-token-2024".to_string());
+    let daemon_url = format!("http://{}:{}", daemon_host, daemon_port);
+    let daemon_client = Arc::new(daemon::DaemonClient::new(daemon_url, daemon_api_key));
+    colorize_println("  ✓ Daemon client initialized", Colors::BrightGreenFg);
+
     // Setup app state
     let jwt_secret = heli_config.get_string("key").unwrap_or("default-secret-key".to_string());
     let app_state = Arc::new(auth::oauth::AppState {
         mongo: Arc::new(mongo_client),
         jwt_secret,
         session_manager: session_manager.clone(),
+        audit: audit_service,
+        daemon_client,
     });
 
     // Setup auth state for protected routes
@@ -185,15 +215,29 @@ async fn main() {
         // Protected routes that require authentication
         let protected_routes = Router::new()
             .route("/api/user/me", get(routes::user::get_me))
+            .route("/api/user/audit", get(routes::audit::get_my_audit_logs))
+            .route("/api/tenants", get(routes::tenants::list_tenants))
+            .route("/api/tenants", axum::routing::post(routes::tenants::create_tenant))
+            .route("/api/tenants/{tenant_id}", axum::routing::delete(routes::tenants::delete_tenant))
+            .route("/api/tenants/{tenant_id}/resources", get(routes::tenants::get_tenant_resources))
+            .route("/api/tenants/{tenant_id}/members", get(routes::tenants::get_tenant_members))
+            .route("/api/tenants/{tenant_id}/members", axum::routing::post(routes::tenants::add_tenant_member))
+            .route("/api/tenants/{tenant_id}/members/by-email", axum::routing::post(routes::tenants::add_tenant_member_by_email))
+            .route("/api/tenants/{tenant_id}/members/{user_id}", axum::routing::delete(routes::tenants::remove_tenant_member))
+            .route("/api/tenants/{tenant_id}/transfer", axum::routing::post(routes::tenants::transfer_tenant_ownership))
+            .route("/api/tenants/{tenant_id}/audit", get(routes::audit::get_tenant_audit_logs))
+            .route("/api/tenants/{tenant_id}/servers", get(routes::servers::list_servers))
+            .route("/api/tenants/{tenant_id}/servers", axum::routing::post(routes::servers::create_server))
+            .route("/api/tenants/{tenant_id}/servers/{server_id}", axum::routing::delete(routes::servers::delete_server))
+            .route("/api/tenants/{tenant_id}/billing", get(routes::billing::get_tenant_billing))
+            .route("/api/tenants/{tenant_id}/billing/transactions", get(routes::billing::get_billing_transactions))
+            .route("/api/tenants/{tenant_id}/billing/add-funds", axum::routing::post(routes::billing::add_funds))
+            .route("/api/billing/config", get(routes::billing::get_billing_config))
             .layer(axum::middleware::from_fn_with_state(
                 auth_state.clone(),
                 middleware::auth::auth_middleware
             ))
-            .route("/api/tenants", get(routes::api::tenants))
-            .layer(axum::middleware::from_fn_with_state(
-                auth_state.clone(),
-                middleware::auth::auth_middleware
-            ));
+            .with_state(app_state.clone());
 
         // Build our application with routes (normal mode)
         Router::new()

@@ -7,12 +7,19 @@ node_modules/
 **/.cache/
 **/.tsbuildinfo
 
+
 # db
 server/data/
+server
+trash
+trash/
+old-deprecated-server
 
+#
 # stupid ts server
-server/
 server-rs/config.heli
+.kiro
+
 
 # Editor/OS files
 .DS_Store
@@ -29,6 +36,11 @@ server/config.yml
 # Test coverage
 coverage/
 tests/
+types/*
+useless/
+docs/*
+docs
+
 
 # Ignore config.heli file
 server-rs/config.heli

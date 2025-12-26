@@ -4,6 +4,7 @@ use mongodb::{
 };
 use std::error::Error;
 
+#[derive(Clone)]
 pub struct MongoClient {
     client: Client,
     db_name: String,

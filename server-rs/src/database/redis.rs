@@ -1,5 +1,4 @@
 use redis::{Client, Commands, RedisError};
-use std::time::Duration;
 
 pub struct RedisClient {
     pub client: Client,

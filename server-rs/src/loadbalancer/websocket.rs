@@ -31,7 +31,7 @@ pub async fn websocket_proxy_handler(
 async fn handle_websocket(
     client_ws: WebSocket,
     server: super::balancer::BackendServer,
-    load_balancer: Arc<LoadBalancer>,
+    _load_balancer: Arc<LoadBalancer>,
 ) {
     // Increment connection count
     server.increment_connections().await;
@@ -64,15 +64,15 @@ async fn handle_websocket(
                 Ok(axum_msg) => {
                     // Convert Axum WebSocket message to tungstenite message
                     let backend_msg = match axum_msg {
-                        axum::extract::ws::Message::Text(text) => Message::Text(text.to_string()),
-                        axum::extract::ws::Message::Binary(data) => Message::Binary(data.to_vec()),
-                        axum::extract::ws::Message::Ping(data) => Message::Ping(data.to_vec()),
-                        axum::extract::ws::Message::Pong(data) => Message::Pong(data.to_vec()),
+                        axum::extract::ws::Message::Text(text) => Message::Text(text.to_string().into()),
+                        axum::extract::ws::Message::Binary(data) => Message::Binary(data),
+                        axum::extract::ws::Message::Ping(data) => Message::Ping(data),
+                        axum::extract::ws::Message::Pong(data) => Message::Pong(data),
                         axum::extract::ws::Message::Close(frame) => {
                             if let Some(f) = frame {
                                 Message::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
                                     code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(f.code),
-                                    reason: std::borrow::Cow::Owned(f.reason.to_string()),
+                                    reason: tokio_tungstenite::tungstenite::Utf8Bytes::from(f.reason.to_string()),
                                 }))
                             } else {
                                 Message::Close(None)
@@ -98,10 +98,10 @@ async fn handle_websocket(
                 Ok(backend_msg) => {
                     // Convert tungstenite message to Axum WebSocket message
                     let client_msg = match backend_msg {
-                        Message::Text(text) => axum::extract::ws::Message::Text(text.into()),
-                        Message::Binary(data) => axum::extract::ws::Message::Binary(data.into()),
-                        Message::Ping(data) => axum::extract::ws::Message::Ping(data.into()),
-                        Message::Pong(data) => axum::extract::ws::Message::Pong(data.into()),
+                        Message::Text(text) => axum::extract::ws::Message::Text(text.to_string().into()),
+                        Message::Binary(data) => axum::extract::ws::Message::Binary(data.to_vec().into()),
+                        Message::Ping(data) => axum::extract::ws::Message::Ping(data.to_vec().into()),
+                        Message::Pong(data) => axum::extract::ws::Message::Pong(data.to_vec().into()),
                         Message::Close(frame) => {
                             if let Some(f) = frame {
                                 axum::extract::ws::Message::Close(Some(axum::extract::ws::CloseFrame {

@@ -7,15 +7,18 @@ use mongodb::bson::doc;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::auth::{jwt, password};
+use crate::auth::password;
 use crate::database::mongo::MongoClient;
 use crate::database::session::SessionManager;
 use crate::models::user::{RegisterRequest, RegisterResponse, LoginRequest, LoginResponse, User};
+use crate::models::tenant::{Tenant, TenantMember};
 
 pub struct AppState {
     pub mongo: Arc<MongoClient>,
     pub jwt_secret: String,
     pub session_manager: Arc<SessionManager>,
+    pub audit: Arc<crate::database::audit::AuditService>,
+    pub daemon_client: Arc<crate::daemon::DaemonClient>,
 }
 
 pub async fn register(
@@ -79,8 +82,16 @@ pub async fn register(
         }
     };
 
+    // Check if this is the first user (make them admin)
+    let user_count = users_collection.count_documents(doc! {}).await.unwrap_or(0);
+    let is_first_user = user_count == 0;
+
     // Create user
-    let user = User::new(payload.email, payload.username, password_hash);
+    let mut user = User::new(payload.email.clone(), payload.username.clone(), password_hash);
+    if is_first_user {
+        user.is_admin = true;
+        tracing::info!("First user registered - granting admin privileges");
+    }
 
     // Insert user into database
     let insert_result = users_collection.insert_one(&user).await;
@@ -100,6 +111,59 @@ pub async fn register(
                     ));
                 }
             };
+
+            // Auto-create default tenant for the user (best-effort)
+            let tenants_collection = db.collection::<Tenant>("tenants");
+            
+            // Get default package from config
+            let default_package = if let Ok(heli_config) = crate::heli::parse::HeliConfig::parse("./config.heli") {
+                heli_config.get_string("packages.defaultPackage").unwrap_or_else(|| "free".to_string())
+            } else {
+                "free".to_string()
+            };
+            
+            let default_tenant = Tenant {
+                id: None,
+                name: "Default".to_string(),
+                owner_user_id: user_id.clone(),
+                package_id: default_package,
+                extra_memory_mb: 0,
+                extra_disk_mb: 0,
+                extra_cpu_percent: 0,
+                extra_server_slots: 0,
+                members: vec![TenantMember {
+                    user_id: user_id.clone(),
+                    role: "owner".to_string(),
+                }],
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            
+            // Best-effort tenant creation (don't fail registration if this fails)
+            if let Ok(tenant_result) = tenants_collection.insert_one(&default_tenant).await {
+                let tenant_id = tenant_result.inserted_id.as_object_id().unwrap().to_hex();
+                
+                // Audit log tenant creation
+                let _ = state.audit.log(
+                    user_id.clone(),
+                    "tenant:create:auto".to_string(),
+                    json!({
+                        "tenantId": tenant_id,
+                        "name": default_tenant.name,
+                        "packageId": default_tenant.package_id
+                    })
+                ).await;
+            }
+
+            // Audit log the registration
+            let _ = state.audit.log(
+                user_id.clone(),
+                "user:register".to_string(),
+                json!({
+                    "email": payload.email,
+                    "username": payload.username
+                })
+            ).await;
 
             Ok(Json(RegisterResponse { token, user_id }))
         }
@@ -181,6 +245,17 @@ pub async fn login(
             ));
         }
     };
+
+    // Audit log the login
+    let _ = state.audit.log(
+        user_id.clone(),
+        "user:login".to_string(),
+        json!({
+            "email": payload.identifier,
+            "ip": "unknown", // Can be extracted from headers if needed
+            "success": true
+        })
+    ).await;
 
     Ok(Json(LoginResponse { token, user_id }))
 }
