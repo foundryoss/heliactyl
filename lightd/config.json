@@ -1,0 +1,27 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8070
+  },
+  "docker": {
+    "socket_path": "/var/run/docker.sock"
+  },
+  "volumes": {
+    "base_path": "./storage/volumes"
+  },
+  "storage": {
+    "base_path": "./storage",
+    "containers_path": "./storage/containers",
+    "networks_path": "./storage/networks",
+    "logs_path": "./storage/logs"
+  },
+  "containers": {
+    "default_network": "lightd-network",
+    "cleanup_timeout": 30,
+    "max_containers": 100
+  },
+  "logging": {
+    "level": "info",
+    "file": "./storage/lightd.log"
+  }
+}

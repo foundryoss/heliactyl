@@ -88,3 +88,6 @@ Cargo.lock
 *.profraw
 *.profdata
 server-rs/config.heli
+
+wings
+skyportd
