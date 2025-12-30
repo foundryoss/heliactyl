@@ -7,11 +7,42 @@ use tracing::{error, info};
 
 use crate::{
     docker::ContainerManager,
-    models::{ApiResponse, CreateContainerRequest, SuspendRequest, ContainerTracker, ResourceLimits, UpdateContainerRequest, InstallationStatus},
+    models::{ApiResponse, CreateContainerRequest, SuspendRequest, UnsuspendRequest, ContainerTracker, ResourceLimits, UpdateContainerRequest, UpdateLimitsRequest, InstallationStatus, ContainerLookupResponse},
     types::AppState,
     container_tracker::ContainerTrackingManager,
     state_manager::ContainerState,
 };
+
+/// Helper function to check if a container is suspended
+async fn check_container_suspended(state: &AppState, container_id: &str) -> Result<bool, String> {
+    let state_manager = state.state_manager.lock().await;
+    if let Some((uuid, _)) = state_manager.find_by_container_id(container_id) {
+        Ok(state_manager.is_container_suspended(uuid))
+    } else {
+        Err("Container not found in daemon state".to_string())
+    }
+}
+
+/// Helper function to resolve container identifier (UUID or Container ID) to Container ID
+async fn resolve_container_id(state: &AppState, identifier: &str) -> Result<String, String> {
+    let state_manager = state.state_manager.lock().await;
+    
+    // First try to find by container ID
+    if let Some((_, _)) = state_manager.find_by_container_id(identifier) {
+        return Ok(identifier.to_string());
+    }
+    
+    // If not found, try to find by UUID
+    if let Some(container_state) = state_manager.get_container(identifier) {
+        if let Some(container_id) = &container_state.container_id {
+            return Ok(container_id.clone());
+        } else {
+            return Err("Container ID not found for this UUID".to_string());
+        }
+    }
+    
+    Err("Container not found with this identifier".to_string())
+}
 
 /// Create a new container
 pub async fn create_container(
@@ -207,6 +238,17 @@ pub async fn start_container(
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     info!("Starting container: {}", id);
     
+    // Check if container is suspended
+    match check_container_suspended(&state, &id).await {
+        Ok(true) => {
+            return Ok(Json(ApiResponse::error("Cannot start suspended container. Unsuspend it first.".to_string())));
+        }
+        Ok(false) => {}, // Not suspended, continue
+        Err(e) => {
+            return Ok(Json(ApiResponse::error(e)));
+        }
+    }
+    
     let manager = ContainerManager::new(state.docker.client());
     match manager.start(&id).await {
         Ok(_) => {
@@ -308,40 +350,89 @@ pub async fn kill_container(
     }
 }
 
-/// Suspend (pause) a container
+/// Suspend a container (kill and lock completely)
 pub async fn suspend_container(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SuspendRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    info!("Suspending container: {} with message: {:?}", id, req.message);
+    let reason = req.message.unwrap_or_else(|| "Container suspended by administrator".to_string());
+    info!("Suspending container: {} with reason: {}", id, reason);
     
-    let manager = ContainerManager::new(state.docker.client());
-    match manager.suspend(&id, req.message).await {
-        Ok(_) => {
-            // Update daemon state
-            let state_manager = state.state_manager.lock().await;
-            if let Some((uuid, _)) = state_manager.find_by_container_id(&id) {
-                let uuid = uuid.clone();
-                drop(state_manager);
-                if let Err(e) = state.state_manager.lock().await.update_container_state(&uuid, "paused").await {
-                    error!("Failed to update container state in daemon state: {}", e);
-                }
-            }
-            
-            // Update container tracker status
-            if let Ok(Some(tracker)) = state.container_tracker.find_by_container_id(&id).await {
-                if let Err(e) = state.container_tracker.update_container_status(&tracker.custom_uuid, "paused").await {
-                    error!("Failed to update container tracker status: {}", e);
-                }
-            }
-            
-            Ok(Json(ApiResponse::success(format!("Container {} suspended", id))))
+    // Find container UUID first
+    let state_manager = state.state_manager.lock().await;
+    if let Some((uuid, _container_state)) = state_manager.find_by_container_id(&id) {
+        let uuid = uuid.clone();
+        drop(state_manager);
+        
+        // Check if already suspended
+        if state.state_manager.lock().await.is_container_suspended(&uuid) {
+            return Ok(Json(ApiResponse::error("Container is already suspended".to_string())));
         }
-        Err(e) => {
-            error!("Failed to suspend container {}: {}", id, e);
-            Ok(Json(ApiResponse::error(e.to_string())))
+        
+        let manager = ContainerManager::new(state.docker.client());
+        match manager.suspend(&id, Some(reason.clone())).await {
+            Ok(_) => {
+                // Update daemon state to suspended
+                if let Err(e) = state.state_manager.lock().await.suspend_container(&uuid, &reason).await {
+                    error!("Failed to update container state to suspended: {}", e);
+                }
+                
+                // Update container tracker status
+                if let Ok(Some(tracker)) = state.container_tracker.find_by_container_id(&id).await {
+                    if let Err(e) = state.container_tracker.update_container_status(&tracker.custom_uuid, "suspended").await {
+                        error!("Failed to update container tracker status: {}", e);
+                    }
+                }
+                
+                Ok(Json(ApiResponse::success(format!("Container {} suspended: {}", id, reason))))
+            }
+            Err(e) => {
+                error!("Failed to suspend container {}: {}", id, e);
+                Ok(Json(ApiResponse::error(e.to_string())))
+            }
         }
+    } else {
+        Ok(Json(ApiResponse::error("Container not found in daemon state".to_string())))
+    }
+}
+
+/// Unsuspend a container (remove suspension lock)
+pub async fn unsuspend_container(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UnsuspendRequest>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    let reason = req.message.unwrap_or_else(|| "Container unsuspended by administrator".to_string());
+    info!("Unsuspending container: {} with reason: {}", id, reason);
+    
+    // Find container UUID first
+    let state_manager = state.state_manager.lock().await;
+    if let Some((uuid, _container_state)) = state_manager.find_by_container_id(&id) {
+        let uuid = uuid.clone();
+        drop(state_manager);
+        
+        // Check if actually suspended
+        if !state.state_manager.lock().await.is_container_suspended(&uuid) {
+            return Ok(Json(ApiResponse::error("Container is not suspended".to_string())));
+        }
+        
+        // Update daemon state to unsuspended (stopped)
+        if let Err(e) = state.state_manager.lock().await.unsuspend_container(&uuid).await {
+            error!("Failed to unsuspend container in daemon state: {}", e);
+            return Ok(Json(ApiResponse::error("Failed to unsuspend container".to_string())));
+        }
+        
+        // Update container tracker status
+        if let Ok(Some(tracker)) = state.container_tracker.find_by_container_id(&id).await {
+            if let Err(e) = state.container_tracker.update_container_status(&tracker.custom_uuid, "stopped").await {
+                error!("Failed to update container tracker status: {}", e);
+            }
+        }
+        
+        Ok(Json(ApiResponse::success(format!("Container {} unsuspended: {}. Container is now stopped and can be started.", id, reason))))
+    } else {
+        Ok(Json(ApiResponse::error("Container not found in daemon state".to_string())))
     }
 }
 
@@ -351,6 +442,17 @@ pub async fn attach_container(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<crate::models::AttachResponse>>, StatusCode> {
     info!("Creating shell session for container: {}", id);
+    
+    // Check if container is suspended
+    match check_container_suspended(&state, &id).await {
+        Ok(true) => {
+            return Ok(Json(ApiResponse::error("Cannot attach to suspended container".to_string())));
+        }
+        Ok(false) => {}, // Not suspended, continue
+        Err(e) => {
+            return Ok(Json(ApiResponse::error(e)));
+        }
+    }
     
     let manager = ContainerManager::new(state.docker.client());
     match manager.attach(&id).await {
@@ -415,6 +517,17 @@ pub async fn exec_container(
     Json(req): Json<crate::models::ExecRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     info!("Executing command in container {}: {:?}", id, req.command);
+    
+    // Check if container is suspended
+    match check_container_suspended(&state, &id).await {
+        Ok(true) => {
+            return Ok(Json(ApiResponse::error("Cannot execute commands in suspended container".to_string())));
+        }
+        Ok(false) => {}, // Not suspended, continue
+        Err(e) => {
+            return Ok(Json(ApiResponse::error(e)));
+        }
+    }
     
     let manager = ContainerManager::new(state.docker.client());
     let cmd_refs: Vec<&str> = req.command.iter().map(|s| s.as_str()).collect();
@@ -508,6 +621,17 @@ pub async fn update_container(
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     info!("Updating container: {}", id);
     
+    // Check if container is suspended
+    match check_container_suspended(&state, &id).await {
+        Ok(true) => {
+            return Ok(Json(ApiResponse::error("Cannot update suspended container".to_string())));
+        }
+        Ok(false) => {}, // Not suspended, continue
+        Err(e) => {
+            return Ok(Json(ApiResponse::error(e)));
+        }
+    }
+    
     // Check if container is locked (installing/updating)
     let state_manager = state.state_manager.lock().await;
     if let Some((uuid, container_state)) = state_manager.find_by_container_id(&id) {
@@ -564,6 +688,65 @@ pub async fn update_container(
     }
 }
 
+/// Update container resource limits
+pub async fn update_container_limits(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateLimitsRequest>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    info!("Updating limits for container: {}", id);
+    
+    // Check if container is suspended
+    match check_container_suspended(&state, &id).await {
+        Ok(true) => {
+            return Ok(Json(ApiResponse::error("Cannot update limits of suspended container".to_string())));
+        }
+        Ok(false) => {}, // Not suspended, continue
+        Err(e) => {
+            return Ok(Json(ApiResponse::error(e)));
+        }
+    }
+    
+    // Check if container is locked (installing/updating)
+    let state_manager = state.state_manager.lock().await;
+    if let Some((uuid, container_state)) = state_manager.find_by_container_id(&id) {
+        if container_state.locked.unwrap_or(false) {
+            return Ok(Json(ApiResponse::error("Container is currently locked (installing/updating)".to_string())));
+        }
+        let uuid = uuid.clone();
+        drop(state_manager);
+        
+        let restart = req.restart_container.unwrap_or(false);
+        let manager = ContainerManager::new(state.docker.client());
+        
+        // Update limits in container
+        match manager.update_limits(&id, &req.limits, restart).await {
+            Ok(result) => {
+                // Update daemon state with new limits
+                if let Err(e) = state.state_manager.lock().await.update_container_limits(&uuid, &req.limits).await {
+                    error!("Failed to save updated limits to daemon state: {}", e);
+                }
+                
+                // Update container tracker with new limits
+                if let Ok(Some(mut tracker)) = state.container_tracker.find_by_container_id(&id).await {
+                    tracker.limits = req.limits.clone();
+                    if let Err(e) = state.container_tracker.save_container(&tracker).await {
+                        error!("Failed to update container tracker with new limits: {}", e);
+                    }
+                }
+                
+                Ok(Json(ApiResponse::success(result)))
+            }
+            Err(e) => {
+                error!("Failed to update limits for container {}: {}", id, e);
+                Ok(Json(ApiResponse::error(e.to_string())))
+            }
+        }
+    } else {
+        Ok(Json(ApiResponse::error("Container not found in daemon state".to_string())))
+    }
+}
+
 /// Get container installation/update status
 pub async fn get_container_status(
     State(state): State<AppState>,
@@ -581,5 +764,85 @@ pub async fn get_container_status(
         Ok(Json(ApiResponse::success(status)))
     } else {
         Ok(Json(ApiResponse::error("Container not found in daemon state".to_string())))
+    }
+}
+
+/// Get container ID from UUID
+pub async fn get_container_by_uuid(
+    State(state): State<AppState>,
+    Path(uuid): Path<String>,
+) -> Result<Json<ApiResponse<ContainerLookupResponse>>, StatusCode> {
+    info!("Looking up container by UUID: {}", uuid);
+    
+    let state_manager = state.state_manager.lock().await;
+    if let Some(container_state) = state_manager.get_container(&uuid) {
+        if let Some(container_id) = &container_state.container_id {
+            let response = ContainerLookupResponse {
+                uuid: uuid.clone(),
+                container_id: container_id.clone(),
+                name: container_state.name.clone(),
+                state: container_state.state.clone(),
+                image: container_state.image.clone(),
+            };
+            Ok(Json(ApiResponse::success(response)))
+        } else {
+            Ok(Json(ApiResponse::error("Container ID not found for this UUID".to_string())))
+        }
+    } else {
+        Ok(Json(ApiResponse::error("Container not found with this UUID".to_string())))
+    }
+}
+
+/// Start a container by UUID
+pub async fn start_container_by_uuid(
+    State(state): State<AppState>,
+    Path(uuid): Path<String>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    info!("Starting container by UUID: {}", uuid);
+    
+    match resolve_container_id(&state, &uuid).await {
+        Ok(container_id) => start_container(State(state), Path(container_id)).await,
+        Err(e) => Ok(Json(ApiResponse::error(e))),
+    }
+}
+
+/// Stop a container by UUID
+pub async fn stop_container_by_uuid(
+    State(state): State<AppState>,
+    Path(uuid): Path<String>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    info!("Stopping container by UUID: {}", uuid);
+    
+    match resolve_container_id(&state, &uuid).await {
+        Ok(container_id) => stop_container(State(state), Path(container_id)).await,
+        Err(e) => Ok(Json(ApiResponse::error(e))),
+    }
+}
+
+/// Suspend a container by UUID
+pub async fn suspend_container_by_uuid(
+    State(state): State<AppState>,
+    Path(uuid): Path<String>,
+    Json(req): Json<SuspendRequest>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    info!("Suspending container by UUID: {}", uuid);
+    
+    match resolve_container_id(&state, &uuid).await {
+        Ok(container_id) => suspend_container(State(state), Path(container_id), Json(req)).await,
+        Err(e) => Ok(Json(ApiResponse::error(e))),
+    }
+}
+
+/// Unsuspend a container by UUID
+pub async fn unsuspend_container_by_uuid(
+    State(state): State<AppState>,
+    Path(uuid): Path<String>,
+    Json(req): Json<UnsuspendRequest>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    info!("Unsuspending container by UUID: {}", uuid);
+    
+    match resolve_container_id(&state, &uuid).await {
+        Ok(container_id) => unsuspend_container(State(state), Path(container_id), Json(req)).await,
+        Err(e) => Ok(Json(ApiResponse::error(e))),
     }
 }

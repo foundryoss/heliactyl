@@ -2,6 +2,7 @@ use bollard::Docker;
 use tracing::{error, info};
 
 /// Docker client wrapper for managing Docker daemon connections
+#[derive(Clone)]
 pub struct DockerClient {
     pub client: Docker,
 }

@@ -1,6 +1,6 @@
 use axum::{
     response::Json,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use clap::{Parser, Subcommand};
@@ -23,6 +23,8 @@ mod types;
 mod network_config;
 mod container_tracker;
 mod state_manager;
+mod monitoring;
+mod websocket;
 
 use container_tracker::ContainerTrackingManager;
 use state_manager::StateManager;
@@ -382,38 +384,114 @@ async fn start_daemon() -> anyhow::Result<()> {
     // Perform daemon recovery
     perform_daemon_recovery(&docker, &mut state_manager).await?;
 
+    // Initialize resource monitor if enabled
+    let resource_monitor = if config.monitoring.as_ref().map(|m| m.enabled).unwrap_or(true) {
+        let monitoring_config = config.monitoring.as_ref().cloned().unwrap_or_default();
+        let ru_config = crate::monitoring::ru_calculator::RUConfig {
+            cpu_weight: monitoring_config.ru_config.cpu_weight,
+            memory_weight: monitoring_config.ru_config.memory_weight,
+            io_weight: monitoring_config.ru_config.io_weight,
+            network_weight: monitoring_config.ru_config.network_weight,
+            storage_weight: monitoring_config.ru_config.storage_weight,
+            base_ru: monitoring_config.ru_config.base_ru,
+        };
+        
+        let state_manager_arc = Arc::new(Mutex::new(state_manager));
+        let monitor = Arc::new(crate::monitoring::ResourceMonitor::new(
+            Arc::new(docker.client.clone()),
+            Arc::clone(&state_manager_arc),
+            ru_config,
+            monitoring_config.interval_ms,
+        ));
+        
+        // Start monitoring in background
+        let monitor_clone = monitor.clone();
+        tokio::spawn(async move {
+            monitor_clone.start_monitoring().await;
+        });
+        
+        info!("Resource monitoring started with interval: {}ms", monitoring_config.interval_ms);
+        (Some(monitor), state_manager_arc)
+    } else {
+        info!("Resource monitoring is disabled");
+        (None, Arc::new(Mutex::new(state_manager)))
+    };
+
+    // Initialize WebSocket token manager
+    let websocket_tokens = Arc::new(crate::websocket::TokenManager::new());
+    let websocket_broadcasters = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    
+    // Start token cleanup task
+    let token_manager_clone = websocket_tokens.clone();
+    tokio::spawn(async move {
+        token_manager_clone.start_cleanup_task().await;
+    });
+
     let state = AppState {
         docker: Arc::new(docker),
         config: Arc::new(config.clone()),
         network: Arc::new(Mutex::new(network)),
         network_config: Arc::new(network_config.clone()),
         container_tracker: Arc::new(container_tracker),
-        state_manager: Arc::new(Mutex::new(state_manager)),
+        state_manager: resource_monitor.1,
+        resource_monitor: resource_monitor.0,
+        websocket_tokens,
+        websocket_broadcasters,
     };
 
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/containers", post(handlers::container::create_container))
         .route("/containers", get(handlers::container::list_containers))
-        .route("/containers/:id", get(handlers::container::inspect_container))
         .route("/containers/:id", delete(handlers::container::remove_container))
         .route("/containers/:id/start", post(handlers::container::start_container))
         .route("/containers/:id/stop", post(handlers::container::stop_container))
         .route("/containers/:id/kill", post(handlers::container::kill_container))
         .route("/containers/:id/suspend", post(handlers::container::suspend_container))
+        .route("/containers/:id/unsuspend", post(handlers::container::unsuspend_container))
         .route("/containers/:id/attach", post(handlers::container::attach_container))
         .route("/containers/:id/exec", post(handlers::container::exec_container))
         .route("/containers/:id/logs", post(handlers::container::get_container_logs))
         .route("/containers/:id/stats", get(handlers::container::get_container_stats))
         .route("/containers/:id/debug", get(handlers::container::debug_container))
         .route("/containers/:id/update", post(handlers::container::update_container))
+        .route("/containers/:id/limits", put(handlers::container::update_container_limits))
         .route("/containers/:id/status", get(handlers::container::get_container_status))
+        .route("/containers/uuid/:uuid", get(handlers::container::get_container_by_uuid))
+        .route("/containers/uuid/:uuid/start", post(handlers::container::start_container_by_uuid))
+        .route("/containers/uuid/:uuid/stop", post(handlers::container::stop_container_by_uuid))
+        .route("/containers/uuid/:uuid/suspend", post(handlers::container::suspend_container_by_uuid))
+        .route("/containers/uuid/:uuid/unsuspend", post(handlers::container::unsuspend_container_by_uuid))
+        // WebSocket routes
+        .route("/websocket/generate", get(handlers::websocket::generate_websocket_token))
+        .route("/websocket", get(handlers::websocket::websocket_handler))
         // Filesystem routes
         .route("/containers/:id/files", get(handlers::filesystem::list_directory))
         .route("/containers/:id/files/content/*path", get(handlers::filesystem::get_file_content))
         .route("/containers/:id/files/write", post(handlers::filesystem::write_file))
         .route("/containers/:id/files/mkdir", post(handlers::filesystem::create_directory))
         .route("/containers/:id/files/delete", post(handlers::filesystem::delete_path))
+        .route("/containers/:id/files/chmod", post(handlers::filesystem::chmod_path))
+        .route("/containers/:id/files/chown", post(handlers::filesystem::chown_path))
+        .route("/containers/:id/files/archive", post(handlers::filesystem::create_archive))
+        .route("/containers/:id/files/extract", post(handlers::filesystem::extract_archive))
+        .route("/containers/:id/files/zip", post(handlers::filesystem::create_zip))
+        .route("/containers/:id/files/unzip", post(handlers::filesystem::extract_zip))
+        .route("/containers/:id/files/copy", post(handlers::filesystem::copy_file))
+        // Monitoring routes
+        .route("/monitoring/system", get(handlers::monitoring::get_system_metrics))
+        .route("/monitoring/system/history", get(handlers::monitoring::get_system_metrics_history))
+        .route("/monitoring/containers/:id", get(handlers::monitoring::get_container_metrics))
+        .route("/monitoring/containers/:id/history", get(handlers::monitoring::get_container_metrics_history))
+        .route("/monitoring/ru/summary", get(handlers::monitoring::get_ru_summary))
+        .route("/monitoring/ru/containers/:id", get(handlers::monitoring::get_container_ru_breakdown))
+        // Snapshot routes
+        .route("/snapshots", get(handlers::snapshot::list_snapshots))
+        .route("/snapshots/:id", get(handlers::snapshot::get_snapshot_info))
+        .route("/snapshots/:id", delete(handlers::snapshot::delete_snapshot))
+        .route("/snapshots/:id/restore", post(handlers::snapshot::restore_snapshot))
+        .route("/containers/:id/snapshots", get(handlers::snapshot::list_container_snapshots))
+        .route("/containers/:id/snapshots", post(handlers::snapshot::create_snapshot))
         .route("/volumes", post(handlers::volume::create_volume))
         .route("/volumes", get(handlers::volume::list_volumes))
         .route("/volumes/:name", delete(handlers::volume::remove_volume))

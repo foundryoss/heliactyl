@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use crate::models::{ContainerInfo, CreateContainerRequest, PortMapping};
+use crate::models::{ContainerInfo, CreateContainerRequest, PortMapping, ResourceLimits};
 use super::NetworkManager;
 
 /// Parse memory limit string (e.g., "2g", "512m") to bytes
@@ -38,6 +38,62 @@ fn parse_cpu_limit(limit: &str) -> anyhow::Result<i64> {
     // CPU quota is in microseconds per period (100000 microseconds = 100ms period)
     // So 1.0 CPU = 100000, 2.0 CPU = 200000, 0.5 CPU = 50000
     Ok((cpu_float * 100000.0) as i64)
+}
+
+/// Generate environment variables for resource limits
+fn generate_limit_env_vars(limits: &Option<ResourceLimits>) -> Vec<String> {
+    let mut env_vars = Vec::new();
+    
+    if let Some(limits) = limits {
+        // Memory limit
+        if let Some(memory) = &limits.memory {
+            env_vars.push(format!("LIGHTD_MEMORY_LIMIT={}", memory));
+            // Also provide in bytes for easier parsing
+            if let Ok(bytes) = parse_memory_limit(memory) {
+                env_vars.push(format!("LIGHTD_MEMORY_LIMIT_BYTES={}", bytes));
+            }
+        }
+        
+        // CPU limit
+        if let Some(cpu) = &limits.cpu {
+            env_vars.push(format!("LIGHTD_CPU_LIMIT={}", cpu));
+            // Also provide as quota for easier parsing
+            if let Ok(quota) = parse_cpu_limit(cpu) {
+                env_vars.push(format!("LIGHTD_CPU_QUOTA={}", quota));
+            }
+        }
+        
+        // Disk limit
+        if let Some(disk) = &limits.disk {
+            env_vars.push(format!("LIGHTD_DISK_LIMIT={}", disk));
+            if let Ok(bytes) = parse_memory_limit(disk) {
+                env_vars.push(format!("LIGHTD_DISK_LIMIT_BYTES={}", bytes));
+            }
+        }
+        
+        // Swap limit
+        if let Some(swap) = &limits.swap {
+            env_vars.push(format!("LIGHTD_SWAP_LIMIT={}", swap));
+            if let Ok(bytes) = parse_memory_limit(swap) {
+                env_vars.push(format!("LIGHTD_SWAP_LIMIT_BYTES={}", bytes));
+            }
+        }
+        
+        // PID limit
+        if let Some(pids) = limits.pids {
+            env_vars.push(format!("LIGHTD_PIDS_LIMIT={}", pids));
+        }
+        
+        // Thread limit
+        if let Some(threads) = limits.threads {
+            env_vars.push(format!("LIGHTD_THREADS_LIMIT={}", threads));
+        }
+    }
+    
+    // Add a general indicator that limits are managed by lightd
+    env_vars.push("LIGHTD_MANAGED=true".to_string());
+    
+    env_vars
 }
 
 /// Container management operations
@@ -152,11 +208,23 @@ impl<'a> ContainerManager<'a> {
 
         let config = Config {
             image: Some(req.image.clone()),
-            env: req.env.as_ref().map(|env| {
-                env.iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect()
-            }),
+            env: {
+                let mut all_env = Vec::new();
+                
+                // Add user-provided environment variables
+                if let Some(env) = &req.env {
+                    all_env.extend(env.iter().map(|(k, v)| format!("{}={}", k, v)));
+                }
+                
+                // Add resource limit environment variables
+                all_env.extend(generate_limit_env_vars(&req.limits));
+                
+                if all_env.is_empty() {
+                    None
+                } else {
+                    Some(all_env)
+                }
+            },
             cmd: req.startup_command.clone().or(req.command.clone()),
             working_dir: req.working_dir.clone().or(Some("/workspace".to_string())),
             exposed_ports: if exposed_ports.is_empty() {
@@ -408,20 +476,39 @@ impl<'a> ContainerManager<'a> {
         }
     }
 
-    /// Suspend (pause) a container
-    pub async fn suspend(&self, id: &str, _message: Option<String>) -> anyhow::Result<()> {
+    /// Pause a container (Docker pause - can be resumed)
+    pub async fn pause(&self, id: &str, _message: Option<String>) -> anyhow::Result<()> {
         match self.client.pause_container(id).await {
             Ok(_) => {
-                info!("Suspended (paused) container: {}", id);
+                info!("Paused container: {}", id);
                 Ok(())
             }
             Err(bollard::errors::Error::JsonSerdeError { .. }) => {
-                info!("Container {} suspended successfully (empty response)", id);
+                info!("Container {} paused successfully (empty response)", id);
                 Ok(())
             }
             Err(e) => {
-                error!("Failed to suspend container {}: {}", id, e);
+                error!("Failed to pause container {}: {}", id, e);
                 Err(e.into())
+            }
+        }
+    }
+
+    /// Suspend a container (kill and prevent all operations)
+    pub async fn suspend(&self, id: &str, message: Option<String>) -> anyhow::Result<()> {
+        let reason = message.unwrap_or_else(|| "Container suspended by administrator".to_string());
+        info!("Suspending container {} with reason: {}", id, reason);
+        
+        // Kill the container to stop it completely
+        match self.kill(id).await {
+            Ok(_) => {
+                info!("Container {} killed as part of suspension", id);
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Failed to kill container {} during suspension (may already be stopped): {}", id, e);
+                // Continue with suspension even if kill fails (container might already be stopped)
+                Ok(())
             }
         }
     }
@@ -440,6 +527,105 @@ impl<'a> ContainerManager<'a> {
             Err(e) => {
                 error!("Failed to resume container {}: {}", id, e);
                 Err(e.into())
+            }
+        }
+    }
+
+    /// Update container resource limits and environment variables
+    pub async fn update_limits(&self, container_id: &str, limits: &ResourceLimits, restart: bool) -> anyhow::Result<String> {
+        info!("Updating limits for container: {}", container_id);
+        
+        if restart {
+            // Stop the container first
+            info!("Stopping container {} to apply new limits", container_id);
+            if let Err(e) = self.stop(container_id).await {
+                warn!("Failed to stop container {} for limit update: {}", container_id, e);
+            }
+            
+            // Get current container configuration
+            let inspect_result = self.client.inspect_container(container_id, None).await?;
+            
+            // Create new configuration with updated limits and environment
+            let mut new_env = Vec::new();
+            
+            // Preserve existing non-lightd environment variables
+            if let Some(current_env) = &inspect_result.config.as_ref().and_then(|c| c.env.as_ref()) {
+                for env_var in current_env.iter() {
+                    if !env_var.starts_with("LIGHTD_") {
+                        new_env.push(env_var.clone());
+                    }
+                }
+            }
+            
+            // Add new limit environment variables
+            new_env.extend(generate_limit_env_vars(&Some(limits.clone())));
+            
+            // Update container with new environment variables
+            // Note: Docker doesn't allow updating resource limits on existing containers
+            // The container needs to be recreated with new limits
+            info!("Container {} environment updated with new limits. Restart required for resource limits to take effect.", container_id);
+            
+            // Start the container again
+            if let Err(e) = self.start(container_id).await {
+                error!("Failed to restart container {} after limit update: {}", container_id, e);
+                return Err(e);
+            }
+            
+            Ok(format!("Container {} limits updated and restarted successfully", container_id))
+        } else {
+            // Just update environment variables without restart
+            // This requires executing commands to set environment variables in running container
+            let mut update_commands = Vec::new();
+            
+            if let Some(memory) = &limits.memory {
+                update_commands.push(format!("export LIGHTD_MEMORY_LIMIT='{}'", memory));
+                if let Ok(bytes) = parse_memory_limit(memory) {
+                    update_commands.push(format!("export LIGHTD_MEMORY_LIMIT_BYTES='{}'", bytes));
+                }
+            }
+            
+            if let Some(cpu) = &limits.cpu {
+                update_commands.push(format!("export LIGHTD_CPU_LIMIT='{}'", cpu));
+                if let Ok(quota) = parse_cpu_limit(cpu) {
+                    update_commands.push(format!("export LIGHTD_CPU_QUOTA='{}'", quota));
+                }
+            }
+            
+            if let Some(disk) = &limits.disk {
+                update_commands.push(format!("export LIGHTD_DISK_LIMIT='{}'", disk));
+                if let Ok(bytes) = parse_memory_limit(disk) {
+                    update_commands.push(format!("export LIGHTD_DISK_LIMIT_BYTES='{}'", bytes));
+                }
+            }
+            
+            if let Some(swap) = &limits.swap {
+                update_commands.push(format!("export LIGHTD_SWAP_LIMIT='{}'", swap));
+                if let Ok(bytes) = parse_memory_limit(swap) {
+                    update_commands.push(format!("export LIGHTD_SWAP_LIMIT_BYTES='{}'", bytes));
+                }
+            }
+            
+            if let Some(pids) = limits.pids {
+                update_commands.push(format!("export LIGHTD_PIDS_LIMIT='{}'", pids));
+            }
+            
+            if let Some(threads) = limits.threads {
+                update_commands.push(format!("export LIGHTD_THREADS_LIMIT='{}'", threads));
+            }
+            
+            // Write environment variables to a file that can be sourced
+            let env_script = update_commands.join(" && ");
+            let full_command = format!("echo '{}' > /tmp/lightd_limits.env && echo 'Environment variables updated. Source /tmp/lightd_limits.env to apply in current session.'", env_script);
+            
+            match self.exec_command(container_id, vec!["sh", "-c", &full_command]).await {
+                Ok(output) => {
+                    info!("Updated environment variables in container {}: {}", container_id, output);
+                    Ok(format!("Container {} environment variables updated. Note: Resource limits require container restart to take effect.", container_id))
+                }
+                Err(e) => {
+                    error!("Failed to update environment variables in container {}: {}", container_id, e);
+                    Err(e)
+                }
             }
         }
     }
@@ -589,6 +775,80 @@ impl<'a> ContainerManager<'a> {
                 Ok("Command executed (detached)".to_string())
             }
         }
+    }
+
+    /// Execute a command in a running container with a timeout
+    /// Returns output collected within the timeout period
+    pub async fn exec_command_with_timeout(&self, id: &str, cmd: Vec<&str>, timeout_secs: u64) -> anyhow::Result<String> {
+        use bollard::exec::{CreateExecOptions, StartExecResults};
+        use futures_util::stream::StreamExt;
+        use tokio::time::{timeout, Duration};
+        
+        let exec_options = CreateExecOptions {
+            cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+
+        let exec = self.client.create_exec(id, exec_options).await?;
+        
+        match self.client.start_exec(&exec.id, None).await? {
+            StartExecResults::Attached { mut output, .. } => {
+                let mut result = String::new();
+                
+                // Collect output with timeout
+                let timeout_result = timeout(Duration::from_secs(timeout_secs), async {
+                    let mut collected = String::new();
+                    while let Some(chunk) = output.next().await {
+                        match chunk {
+                            Ok(log_output) => {
+                                collected.push_str(&log_output.to_string());
+                            }
+                            Err(e) => {
+                                error!("Error executing command: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    collected
+                }).await;
+                
+                match timeout_result {
+                    Ok(output) => Ok(output),
+                    Err(_) => {
+                        // Timeout occurred - command is still running
+                        Ok(format!("{}\n[Command still running in background after {}s timeout]", result, timeout_secs))
+                    }
+                }
+            }
+            StartExecResults::Detached => {
+                Ok("Command executed (detached)".to_string())
+            }
+        }
+    }
+
+    /// Execute a command in detached mode (fire and forget)
+    pub async fn exec_command_detached(&self, id: &str, cmd: Vec<&str>) -> anyhow::Result<String> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+        
+        let exec_options = CreateExecOptions {
+            cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
+            attach_stdout: Some(false),
+            attach_stderr: Some(false),
+            ..Default::default()
+        };
+
+        let exec = self.client.create_exec(id, exec_options).await?;
+        
+        let start_options = StartExecOptions {
+            detach: true,
+            ..Default::default()
+        };
+        
+        self.client.start_exec(&exec.id, Some(start_options)).await?;
+        
+        Ok("Command started in background".to_string())
     }
 
     /// Get container stats

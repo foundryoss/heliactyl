@@ -11,6 +11,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub containers: ContainerConfig,
     pub logging: LoggingConfig,
+    pub monitoring: Option<MonitoringConfig>,
     #[serde(skip)]
     pub network: Option<NetworkConfig>,
 }
@@ -50,6 +51,46 @@ pub struct ContainerConfig {
 pub struct LoggingConfig {
     pub level: String,
     pub file: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitoringConfig {
+    pub enabled: bool,
+    pub interval_ms: u64,
+    pub ru_config: RUConfigSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RUConfigSettings {
+    pub cpu_weight: f64,
+    pub memory_weight: f64,
+    pub io_weight: f64,
+    pub network_weight: f64,
+    pub storage_weight: f64,
+    pub base_ru: f64,
+}
+
+impl Default for MonitoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_ms: 1000, // 1 second
+            ru_config: RUConfigSettings::default(),
+        }
+    }
+}
+
+impl Default for RUConfigSettings {
+    fn default() -> Self {
+        Self {
+            cpu_weight: 1.0,
+            memory_weight: 0.5,
+            io_weight: 2.0,
+            network_weight: 1.5,
+            storage_weight: 0.8,
+            base_ru: 0.1,
+        }
+    }
 }
 
 impl Config {

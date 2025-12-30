@@ -7,6 +7,7 @@ pub mod network_config;
 pub mod container_tracker;
 pub mod state_manager;
 pub mod monitoring;
+pub mod websocket;
 //pub mod cli;
 
 pub use config::Config;

@@ -106,6 +106,11 @@ pub struct SuspendRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct UnsuspendRequest {
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ApiResponse<T> {
     pub success: bool,
     pub data: Option<T>,
@@ -154,6 +159,12 @@ pub struct UpdateContainerRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateLimitsRequest {
+    pub limits: ResourceLimits,
+    pub restart_container: Option<bool>, // Whether to restart container to apply limits (default: false)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InstallationStatus {
     pub status: String, // "installing", "updating", "ready", "failed"
     pub progress: Option<String>,
@@ -179,4 +190,96 @@ pub struct CreateDirectoryRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteRequest {
     pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChmodRequest {
+    pub path: String,
+    pub permissions: String, // e.g., "755", "u+x", "go-w"
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChownRequest {
+    pub path: String,
+    pub owner: String,
+    pub group: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateArchiveRequest {
+    pub source_path: String,
+    pub archive_path: String,
+    pub compression: Option<String>, // "gzip", "bzip2", "xz", or None
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExtractArchiveRequest {
+    pub archive_path: String,
+    pub destination_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateZipRequest {
+    pub source_path: String,
+    pub zip_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExtractZipRequest {
+    pub zip_path: String,
+    pub destination_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CopyFileRequest {
+    pub source_path: String,
+    pub destination_path: String,
+    pub move_file: Option<bool>, // true for move, false for copy (default)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ContainerLookupResponse {
+    pub uuid: String,
+    pub container_id: String,
+    pub name: String,
+    pub state: String,
+    pub image: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WebSocketTokenRequest {
+    pub container_id: String, // Can be UUID or Docker container ID
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WebSocketTokenResponse {
+    pub token: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub container_id: String,
+    pub container_uuid: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WebSocketMessage {
+    pub event: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ContainerStats {
+    pub memory_bytes: u64,
+    pub memory_limit_bytes: u64,
+    pub cpu_absolute: f64,
+    pub network: NetworkStats,
+    pub uptime: u64,
+    pub state: String,
+    pub disk_bytes: u64,
+    #[serde(default)]
+    pub is_suspended: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NetworkStats {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }

@@ -41,7 +41,7 @@ pub struct DaemonState {
 
 pub struct StateManager {
     state_file_path: String,
-    state: DaemonState,
+    pub state: DaemonState,
 }
 
 impl StateManager {
@@ -89,7 +89,7 @@ impl StateManager {
         Ok(())
     }
 
-    async fn save_state(&self) -> anyhow::Result<()> {
+    pub async fn save_state(&self) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(&self.state)?;
         fs::write(&self.state_file_path, content).await?;
         Ok(())
@@ -200,6 +200,62 @@ impl StateManager {
             info!("Unlocked container {}", uuid);
         } else {
             warn!("Attempted to unlock non-existent container: {}", uuid);
+        }
+        Ok(())
+    }
+
+    pub async fn suspend_container(&mut self, uuid: &str, reason: &str) -> anyhow::Result<()> {
+        if let Some(container) = self.state.containers.get_mut(uuid) {
+            container.state = "suspended".to_string();
+            container.locked = Some(true);
+            container.lock_reason = Some(reason.to_string());
+            container.locked_at = Some(Utc::now().timestamp());
+            container.updated_at = Utc::now();
+            self.state.last_updated = Utc::now();
+            self.save_state().await?;
+            info!("Suspended container {} with reason: {}", uuid, reason);
+        } else {
+            warn!("Attempted to suspend non-existent container: {}", uuid);
+        }
+        Ok(())
+    }
+
+    pub async fn unsuspend_container(&mut self, uuid: &str) -> anyhow::Result<()> {
+        if let Some(container) = self.state.containers.get_mut(uuid) {
+            container.state = "stopped".to_string(); // Set to stopped, user can start it manually
+            container.locked = Some(false);
+            container.lock_reason = None;
+            container.locked_at = None;
+            container.updated_at = Utc::now();
+            self.state.last_updated = Utc::now();
+            self.save_state().await?;
+            info!("Unsuspended container {}", uuid);
+        } else {
+            warn!("Attempted to unsuspend non-existent container: {}", uuid);
+        }
+        Ok(())
+    }
+
+    pub fn is_container_suspended(&self, uuid: &str) -> bool {
+        self.state.containers.get(uuid)
+            .map(|c| c.state == "suspended")
+            .unwrap_or(false)
+    }
+
+    pub async fn update_container_limits(&mut self, uuid: &str, limits: &crate::models::ResourceLimits) -> anyhow::Result<()> {
+        if let Some(container) = self.state.containers.get_mut(uuid) {
+            container.memory_limit = limits.memory.clone();
+            container.cpu_limit = limits.cpu.clone();
+            container.disk_limit = limits.disk.clone();
+            container.swap_limit = limits.swap.clone();
+            container.pids_limit = limits.pids;
+            container.threads_limit = limits.threads;
+            container.updated_at = Utc::now();
+            self.state.last_updated = Utc::now();
+            self.save_state().await?;
+            info!("Updated limits for container {}", uuid);
+        } else {
+            warn!("Attempted to update limits for non-existent container: {}", uuid);
         }
         Ok(())
     }
