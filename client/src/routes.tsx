@@ -5,17 +5,18 @@ import { ErrorBoundary } from '@/app/error-boundary'
 import AuthPage from '@/pages/Auth'
 import { DashboardPage } from '@/pages/Dashboard'
 import { AccountPage } from '@/pages/Account'
-import { AdminPage } from '@/pages/Admin'
 import { WalletPage } from '@/pages/Wallet'
 import { BillingPage } from '@/pages/Billing'
 import React, { useEffect } from 'react'
 import { ServersPage } from '@/pages/Servers'
 import { ServerRoutes } from '@/pages/server'
+
 import { useTenants } from '@/providers/TenantProvider'
 import { Sidebar } from '@/components/Sidebar'
 import { SidebarGripHandle } from '@/components/FloatingSidebarToggle'
 import { PageTransition } from '@/components/layout/PageTransition'
 import { cn } from '@/utils/cn'
+import { AdminRoutes } from './pages/admin'
 
 function Layout() {
     const { isAuthenticated } = useAuth()
@@ -77,6 +78,11 @@ export function AppRoutes() {
             <Route path="login" element={<AuthPage />} />
             <Route path="register" element={<AuthPage />} />
 
+            {/* Admin routes (separate layout, no main sidebar) */}
+            <Route element={<PrivateRoute />}>
+                <Route path="admin/*" element={<AdminRoutes />} />
+            </Route>
+
             {/* App routes with navbar/layout */}
             <Route element={<Layout />}>
 				<Route element={<PrivateRoute />}>
@@ -86,7 +92,6 @@ export function AppRoutes() {
                     <Route path="billing" element={<BillingPage />} />
                     <Route path="wallet" element={<WalletPage />} />
 					<Route path="account" element={<AccountPage />} />
-					<Route path="admin" element={<AdminPage />} />
 				</Route>
 				<Route path="*" element={<Navigate to="/" replace />} />
 			</Route>

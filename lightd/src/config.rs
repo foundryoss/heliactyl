@@ -5,15 +5,18 @@ use crate::network_config::NetworkConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default = "default_version")]
+    pub version: String,
     pub server: ServerConfig,
     pub docker: DockerConfig,
-    pub volumes: VolumeConfig,
     pub storage: StorageConfig,
-    pub containers: ContainerConfig,
-    pub logging: LoggingConfig,
     pub monitoring: Option<MonitoringConfig>,
     #[serde(skip)]
     pub network: Option<NetworkConfig>,
+}
+
+fn default_version() -> String {
+    "0.1.0".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,29 +31,10 @@ pub struct DockerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolumeConfig {
-    pub base_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     pub base_path: String,
     pub containers_path: String,
-    pub networks_path: String,
-    pub logs_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerConfig {
-    pub default_network: String,
-    pub cleanup_timeout: u64,
-    pub max_containers: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    pub level: String,
-    pub file: String,
+    pub volumes_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +58,7 @@ impl Default for MonitoringConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            interval_ms: 1000, // 1 second
+            interval_ms: 1000,
             ru_config: RUConfigSettings::default(),
         }
     }

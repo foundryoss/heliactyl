@@ -3,21 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>lightd WebSocket Test Client</title>
+    <title>lightd WebSocket Log Viewer</title>
     <style>
         body {
-            font-family: Arial, sans-serif;
-            max-width: 1200px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            max-width: 1000px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #f5f5f5;
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+        }
+        h1 {
+            color: #569cd6;
+            margin-bottom: 20px;
         }
         .container {
-            background: white;
+            background: #252526;
             padding: 20px;
             border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             margin-bottom: 20px;
+            border: 1px solid #3c3c3c;
         }
         .form-group {
             margin-bottom: 15px;
@@ -25,17 +30,24 @@
         label {
             display: block;
             margin-bottom: 5px;
-            font-weight: bold;
+            color: #9cdcfe;
         }
-        input, textarea, select {
+        input {
             width: 100%;
-            padding: 8px;
-            border: 1px solid #ddd;
+            padding: 10px;
+            border: 1px solid #3c3c3c;
             border-radius: 4px;
             box-sizing: border-box;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            font-family: inherit;
+        }
+        input:focus {
+            outline: none;
+            border-color: #569cd6;
         }
         button {
-            background: #007bff;
+            background: #0e639c;
             color: white;
             padding: 10px 20px;
             border: none;
@@ -43,153 +55,138 @@
             cursor: pointer;
             margin-right: 10px;
             margin-bottom: 10px;
+            font-family: inherit;
         }
         button:hover {
-            background: #0056b3;
+            background: #1177bb;
         }
         button:disabled {
-            background: #6c757d;
+            background: #3c3c3c;
             cursor: not-allowed;
         }
         .status {
             padding: 10px;
             border-radius: 4px;
             margin-bottom: 10px;
+            font-weight: bold;
         }
         .status.connected {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+            background: #2d4a3e;
+            color: #4ec9b0;
+            border: 1px solid #4ec9b0;
         }
         .status.disconnected {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+            background: #4a2d2d;
+            color: #f48771;
+            border: 1px solid #f48771;
         }
         .status.connecting {
-            background: #fff3cd;
-            color: #856404;
-            border: 1px solid #ffeaa7;
+            background: #4a3d2d;
+            color: #dcdcaa;
+            border: 1px solid #dcdcaa;
         }
-        .log {
-            background: #f8f9fa;
-            border: 1px solid #dee2e6;
+        .log-container {
+            background: #0d0d0d;
+            border: 1px solid #3c3c3c;
             border-radius: 4px;
-            padding: 10px;
-            height: 300px;
-            overflow-y: auto;
-            font-family: monospace;
-            font-size: 12px;
-            white-space: pre-wrap;
-        }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-        }
-        .stat-card {
-            background: #f8f9fa;
             padding: 15px;
+            height: 500px;
+            overflow-y: auto;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .log-line {
+            margin: 2px 0;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-line.stdout { color: #d4d4d4; }
+        .log-line.info { color: #569cd6; }
+        .log-line.error { color: #f48771; }
+        .log-line.success { color: #4ec9b0; }
+        .log-line.status { color: #dcdcaa; }
+        .timestamp {
+            color: #6a9955;
+            margin-right: 10px;
+        }
+        #tokenInfo {
+            font-size: 11px;
+            color: #6a9955;
+            margin-top: 10px;
+        }
+        .state-badge {
+            display: inline-block;
+            padding: 5px 15px;
             border-radius: 4px;
-            border: 1px solid #dee2e6;
-        }
-        .stat-value {
-            font-size: 24px;
             font-weight: bold;
-            color: #007bff;
+            margin-left: 10px;
         }
-        .stat-label {
-            font-size: 12px;
-            color: #6c757d;
-            text-transform: uppercase;
-        }
+        .state-badge.running { background: #2d4a3e; color: #4ec9b0; }
+        .state-badge.stopped { background: #4a2d2d; color: #f48771; }
+        .state-badge.offline { background: #3c3c3c; color: #808080; }
     </style>
 </head>
 <body>
-    <h1>lightd WebSocket Test Client</h1>
+    <h1>🐳 lightd Log Viewer</h1>
     
     <div class="container">
-        <h2>Connection</h2>
         <div class="form-group">
             <label for="serverUrl">Server URL:</label>
-            <input type="text" id="serverUrl" value="http://localhost:8070" placeholder="http://localhost:8070">
+            <input type="text" id="serverUrl" value="http://localhost:8070">
         </div>
         <div class="form-group">
             <label for="containerId">Container ID/UUID:</label>
             <input type="text" id="containerId" placeholder="Enter container UUID or Docker container ID">
         </div>
-        <button onclick="generateToken()">Generate Token</button>
-        <button onclick="connect()" id="connectBtn" disabled>Connect WebSocket</button>
+        <button onclick="generateToken()">1. Generate Token</button>
+        <button onclick="connect()" id="connectBtn" disabled>2. Connect & Stream Logs</button>
         <button onclick="disconnect()" id="disconnectBtn" disabled>Disconnect</button>
         
         <div id="connectionStatus" class="status disconnected">Disconnected</div>
-        <div id="tokenInfo" style="font-family: monospace; font-size: 12px; color: #6c757d;"></div>
+        <div id="tokenInfo"></div>
     </div>
 
     <div class="container">
-        <h2>Container Stats</h2>
-        <div class="stats" id="statsContainer">
-            <div class="stat-card">
-                <div class="stat-value" id="memoryUsage">-</div>
-                <div class="stat-label">Memory Usage</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="cpuUsage">-</div>
-                <div class="stat-label">CPU Usage</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="networkRx">-</div>
-                <div class="stat-label">Network RX</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="networkTx">-</div>
-                <div class="stat-label">Network TX</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="containerState">-</div>
-                <div class="stat-label">Container State</div>
-            </div>
-        </div>
+        <h2>Container State: <span id="containerState" class="state-badge offline">UNKNOWN</span></h2>
     </div>
 
     <div class="container">
-        <h2>Commands</h2>
-        <div class="form-group">
-            <label for="command">Command:</label>
-            <input type="text" id="command" placeholder="echo 'Hello World'" value="echo 'Hello from WebSocket!'">
-        </div>
-        <button onclick="sendCommand()">Send Command</button>
-        <button onclick="requestStats()">Request Stats</button>
-        
-        <h3>Power Actions</h3>
-        <button onclick="sendPowerAction('start')">Start</button>
-        <button onclick="sendPowerAction('stop')">Stop</button>
-        <button onclick="sendPowerAction('restart')">Restart</button>
-        <button onclick="sendPowerAction('kill')">Kill</button>
-    </div>
-
-    <div class="container">
-        <h2>Console Output & Logs</h2>
-        <div id="log" class="log"></div>
-        <button onclick="clearLog()">Clear Log</button>
+        <h2>Live Console Output</h2>
+        <div id="log" class="log-container"></div>
+        <button onclick="clearLog()">Clear</button>
+        <span id="lineCount" style="margin-left: 15px; color: #6a9955;">0 lines</span>
     </div>
 
     <script>
         let ws = null;
         let token = null;
-        let reconnectAttempts = 0;
-        const maxReconnectAttempts = 5;
+        let lineCount = 0;
 
-        function log(message, type = 'info') {
+        function addLogLine(message, type = 'stdout') {
             const logElement = document.getElementById('log');
             const timestamp = new Date().toLocaleTimeString();
-            const prefix = type === 'error' ? '❌' : type === 'success' ? '✅' : type === 'send' ? '📤' : '📨';
-            logElement.textContent += `[${timestamp}] ${prefix} ${message}\n`;
+            
+            const line = document.createElement('div');
+            line.className = `log-line ${type}`;
+            line.innerHTML = `<span class="timestamp">[${timestamp}]</span>${escapeHtml(message)}`;
+            
+            logElement.appendChild(line);
             logElement.scrollTop = logElement.scrollHeight;
+            
+            lineCount++;
+            document.getElementById('lineCount').textContent = `${lineCount} lines`;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
 
         function clearLog() {
-            document.getElementById('log').textContent = '';
+            document.getElementById('log').innerHTML = '';
+            lineCount = 0;
+            document.getElementById('lineCount').textContent = '0 lines';
         }
 
         function updateConnectionStatus(status, message) {
@@ -198,31 +195,13 @@
             statusElement.textContent = message;
         }
 
-        function formatBytes(bytes) {
-            if (bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-        }
-
-        function updateStats(stats) {
-            try {
-                const data = typeof stats === 'string' ? JSON.parse(stats) : stats;
-                
-                document.getElementById('memoryUsage').textContent = 
-                    `${formatBytes(data.memory_bytes)} / ${formatBytes(data.memory_limit_bytes)}`;
-                document.getElementById('cpuUsage').textContent = 
-                    `${data.cpu_absolute.toFixed(2)}%`;
-                document.getElementById('networkRx').textContent = 
-                    formatBytes(data.network.rx_bytes);
-                document.getElementById('networkTx').textContent = 
-                    formatBytes(data.network.tx_bytes);
-                document.getElementById('containerState').textContent = 
-                    data.state.toUpperCase();
-            } catch (e) {
-                log(`Error parsing stats: ${e.message}`, 'error');
-            }
+        function updateContainerState(state) {
+            const stateElement = document.getElementById('containerState');
+            stateElement.textContent = state.toUpperCase();
+            stateElement.className = 'state-badge ' + (
+                state === 'running' ? 'running' :
+                state === 'stopped' || state === 'offline' ? 'stopped' : 'offline'
+            );
         }
 
         async function generateToken() {
@@ -235,24 +214,22 @@
             }
 
             try {
-                // Use GET with query parameter instead of POST with JSON body
-                const response = await fetch(`${serverUrl}/websocket/generate?container_id=${encodeURIComponent(containerId)}`, {
-                    method: 'GET',
-                });
-
+                addLogLine(`Generating token for container: ${containerId}`, 'info');
+                
+                const response = await fetch(`${serverUrl}/websocket/generate?container_id=${encodeURIComponent(containerId)}`);
                 const result = await response.json();
                 
                 if (result.success) {
                     token = result.data.token;
                     document.getElementById('tokenInfo').textContent = 
-                        `Token: ${token.substring(0, 20)}... (expires: ${new Date(result.data.expires_at).toLocaleString()})`;
+                        `Token: ${token.substring(0, 20)}... | Expires: ${new Date(result.data.expires_at).toLocaleString()}`;
                     document.getElementById('connectBtn').disabled = false;
-                    log('Token generated successfully', 'success');
+                    addLogLine('Token generated successfully!', 'success');
                 } else {
-                    log(`Failed to generate token: ${result.message}`, 'error');
+                    addLogLine(`Failed to generate token: ${result.message}`, 'error');
                 }
             } catch (error) {
-                log(`Error generating token: ${error.message}`, 'error');
+                addLogLine(`Error: ${error.message}`, 'error');
             }
         }
 
@@ -266,122 +243,84 @@
             const wsUrl = serverUrl.replace('http://', 'ws://').replace('https://', 'wss://');
             
             updateConnectionStatus('connecting', 'Connecting...');
-            log('Connecting to WebSocket...', 'info');
+            addLogLine('Connecting to WebSocket...', 'info');
 
             ws = new WebSocket(`${wsUrl}/websocket?token=${token}`);
 
             ws.onopen = function() {
-                updateConnectionStatus('connected', 'Connected');
-                log('WebSocket connected successfully', 'success');
+                updateConnectionStatus('connected', 'Connected - Streaming Logs');
+                addLogLine('WebSocket connected! Waiting for logs...', 'success');
                 document.getElementById('connectBtn').disabled = true;
                 document.getElementById('disconnectBtn').disabled = false;
-                reconnectAttempts = 0;
-                
-                // Request initial stats
-                requestStats();
             };
 
             ws.onmessage = function(event) {
                 try {
                     const message = JSON.parse(event.data);
-                    log(`Received [${message.event}]: ${message.args[0] ? message.args[0].substring(0, 100) : 'empty'}`, 'info');
                     
                     switch (message.event) {
-                        case 'stats':
-                            updateStats(message.args[0]);
+                        case 'init':
+                            // Init message: [container_id, container_uuid, status]
+                            if (message.args && message.args.length >= 3) {
+                                addLogLine(`Connected to container: ${message.args[1]}`, 'success');
+                                updateContainerState(message.args[2]);
+                            }
+                            break;
+                        case 'console_output':
+                            // This is the main log output
+                            if (message.args && message.args[0]) {
+                                addLogLine(message.args[0], 'stdout');
+                            }
                             break;
                         case 'status':
-                            document.getElementById('containerState').textContent = message.args[0].toUpperCase();
+                            if (message.args && message.args[0]) {
+                                updateContainerState(message.args[0]);
+                                addLogLine(`Container status: ${message.args[0]}`, 'status');
+                            }
                             break;
-                        case 'console output':
-                            log(`Console: ${message.args[0]}`, 'info');
-                            break;
-                        case 'command response':
-                            log(`Command output: ${message.args[0]}`, 'success');
-                            break;
-                        case 'power response':
-                            log(`Power action: ${message.args[0]}`, 'success');
+                        case 'daemon_message':
+                            if (message.args && message.args[0]) {
+                                addLogLine(`[daemon] ${message.args[0]}`, 'info');
+                            }
                             break;
                         case 'error':
-                            log(`Error: ${message.args[0]}`, 'error');
+                            if (message.args && message.args[0]) {
+                                addLogLine(`Error: ${message.args[0]}`, 'error');
+                            }
                             break;
+                        default:
+                            addLogLine(`[${message.event}] ${message.args ? message.args.join(' ') : ''}`, 'info');
                     }
                 } catch (e) {
-                    log(`Error parsing message: ${e.message}`, 'error');
+                    // Raw text message
+                    addLogLine(event.data, 'stdout');
                 }
             };
 
             ws.onerror = function(error) {
-                log(`WebSocket error: ${error.message || 'Connection error'}`, 'error');
+                addLogLine(`WebSocket error occurred`, 'error');
             };
 
-            ws.onclose = function() {
+            ws.onclose = function(event) {
                 updateConnectionStatus('disconnected', 'Disconnected');
-                log('WebSocket connection closed', 'info');
+                addLogLine(`WebSocket closed (code: ${event.code})`, 'info');
                 document.getElementById('connectBtn').disabled = false;
                 document.getElementById('disconnectBtn').disabled = true;
-                
-                // Auto-reconnect logic
-                if (reconnectAttempts < maxReconnectAttempts) {
-                    reconnectAttempts++;
-                    log(`Attempting to reconnect (${reconnectAttempts}/${maxReconnectAttempts})...`, 'info');
-                    setTimeout(connect, 5000);
-                }
             };
         }
 
         function disconnect() {
             if (ws) {
-                ws.close();
+                ws.close(1000, 'User disconnected');
                 ws = null;
             }
         }
 
-        function sendMessage(event, args) {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                log('WebSocket not connected', 'error');
-                return;
-            }
-
-            const message = {
-                event: event,
-                args: args
-            };
-
-            ws.send(JSON.stringify(message));
-            log(`Sent [${event}]: ${args.join(', ')}`, 'send');
-        }
-
-        function sendCommand() {
-            const command = document.getElementById('command').value;
-            if (!command) {
-                alert('Please enter a command');
-                return;
-            }
-            sendMessage('send command', [command]);
-        }
-
-        function sendPowerAction(action) {
-            sendMessage('power', [action]);
-        }
-
-        function requestStats() {
-            sendMessage('request stats', []);
-        }
-
-        // Auto-request stats every 5 seconds when connected
-        setInterval(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                requestStats();
-            }
-        }, 5000);
-
         // Initialize
-        log('WebSocket test client loaded', 'info');
-        log('1. Enter your server URL and container ID', 'info');
-        log('2. Click "Generate Token" to get a WebSocket token', 'info');
-        log('3. Click "Connect WebSocket" to establish connection', 'info');
-        log('4. Use the commands and power actions to interact with your container', 'info');
+        addLogLine('lightd Log Viewer ready', 'info');
+        addLogLine('1. Enter server URL and container ID', 'info');
+        addLogLine('2. Click "Generate Token" to get access', 'info');
+        addLogLine('3. Click "Connect & Stream Logs" to view live logs', 'info');
     </script>
 </body>
 </html>

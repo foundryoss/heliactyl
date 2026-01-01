@@ -1,7 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use std::collections::HashMap;
-use tokio::sync::broadcast;
+use tokio::sync::Mutex;
 use crate::{
     config::Config, 
     docker::{DockerClient, NetworkManager}, 
@@ -10,7 +8,6 @@ use crate::{
     state_manager::StateManager, 
     monitoring::ResourceMonitor,
     websocket::TokenManager,
-    models::ContainerStats,
 };
 
 #[derive(Clone)]
@@ -23,9 +20,4 @@ pub struct AppState {
     pub state_manager: Arc<Mutex<StateManager>>,
     pub resource_monitor: Option<Arc<ResourceMonitor>>,
     pub websocket_tokens: Arc<TokenManager>,
-    pub websocket_broadcasters: Arc<RwLock<HashMap<String, (
-        broadcast::Sender<ContainerStats>,
-        broadcast::Sender<String>,
-        broadcast::Sender<String>,
-    )>>>,
 }

@@ -63,9 +63,14 @@ export function createApi(baseUrl: string, getToken: () => string | null) {
 		},
 		servers: {
 			list: (tenantId: string) => request<{ items: any[] }>(`api/tenants/${tenantId}/servers`),
-			create: (tenantId: string, data: { name: string; dockerImage: string; memoryMb: number; diskMb: number; cpuPercent: number; env: Record<string, string> }) => request<{ id: string; containerId: string; name: string; state: string; ports: any[] }>(`api/tenants/${tenantId}/servers`, { method: 'POST', body: JSON.stringify(data) }),
+			create: (tenantId: string, data: { name: string; description?: string; serverSoftwareId: string; nodeId: string; volumes?: any[]; network?: any; limits?: any; env?: Record<string, string>; startup?: any }) => request<{ id: string; containerId: string; name: string; state: string; ports: any[] }>(`api/tenants/${tenantId}/servers`, { method: 'POST', body: JSON.stringify(data) }),
 			delete: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}`, { method: 'DELETE' }),
 			websocket: (tenantId: string, id: string) => request<{ token: string; socket: string }>(`api/tenants/${tenantId}/servers/${id}/websocket`),
+			// Power actions
+			start: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/start`, { method: 'POST' }),
+			stop: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/stop`, { method: 'POST' }),
+			restart: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/restart`, { method: 'POST' }),
+			kill: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/kill`, { method: 'POST' }),
 		},
 		billing: {
 			getTenantBilling: (tenantId: string) => request<{ tenantId: string; billing: any; balance: any }>(`api/tenants/${tenantId}/billing`),
@@ -86,6 +91,28 @@ export function createApi(baseUrl: string, getToken: () => string | null) {
 			eggs: () => request<{ items: Array<{ eggId: number; name: string; dockerImage: string }> }>('api/admin/eggs'),
 			reconcile: () => request<{ ok: boolean; drifts: string[] }>('api/admin/jobs/reconcile/run', { method: 'POST' }),
 			resyncServers: () => request<{ ok: boolean; importedCount: number; imported: Array<{ id: string; pteroServerId: number }> }>('api/admin/jobs/servers/resync', { method: 'POST' }),
+			nodes: () => request<{ items: any[] }>('api/admin/nodes'),
+			createNode: (data: any) => request<{ ok: boolean; id: string }>('api/admin/nodes', { method: 'POST', body: JSON.stringify(data) }),
+			getNode: (id: string) => request<{ node: any }>(`api/admin/nodes/${id}`),
+			updateNode: (id: string, data: any) => request<{ ok: boolean }>(`api/admin/nodes/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+			deleteNode: (id: string) => request<{ ok: boolean }>(`api/admin/nodes/${id}`, { method: 'DELETE' }),
+			software: () => request<{ items: any[] }>('api/admin/software'),
+			createSoftware: (data: any) => request<{ ok: boolean; id: string }>('api/admin/software', { method: 'POST', body: JSON.stringify(data) }),
+			updateSoftware: (id: string, data: any) => request<{ ok: boolean }>(`api/admin/software/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+			deleteSoftware: (id: string) => request<{ ok: boolean }>(`api/admin/software/${id}`, { method: 'DELETE' }),
+		},
+		wallet: {
+			get: () => request<{ ruBalance: number; currencyBalance: number; currency: string }>('api/wallet'),
+			addRU: (amount: number) => request<{ ruBalance: number; added: number }>('api/wallet/ru/add', { method: 'POST', body: JSON.stringify({ amount }) }),
+			deductRU: (amount: number, reason?: string) => request<{ ruBalance: number; deducted: number }>('api/wallet/ru/deduct', { method: 'POST', body: JSON.stringify({ amount, reason }) }),
+			getRUEstimate: (nodeId: string, params?: { cpu?: string; memory?: string; disk?: string }) => {
+				const query = new URLSearchParams()
+				if (params?.cpu) query.set('cpu', params.cpu)
+				if (params?.memory) query.set('memory', params.memory)
+				if (params?.disk) query.set('disk', params.disk)
+				const qs = query.toString()
+				return request<{ ruPerHour: number; ruPerDay: number; ruPerMonth: number; pricePerHour: number; pricePerDay: number; pricePerMonth: number; limits: any }>(`api/wallet/ru/estimate/${nodeId}${qs ? '?' + qs : ''}`)
+			},
 		},
 	}
 }

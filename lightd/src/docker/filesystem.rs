@@ -53,7 +53,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -95,7 +95,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(stat_cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -132,7 +132,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -176,7 +176,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -221,7 +221,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -266,7 +266,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -317,7 +317,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -368,7 +368,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -430,7 +430,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -481,7 +481,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -562,7 +562,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -650,7 +650,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -697,7 +697,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -739,7 +739,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -809,7 +809,7 @@ impl<'a> FilesystemManager<'a> {
             cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(false),
             attach_stderr: Some(false),
-            working_dir: Some("/workspace".to_string()),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 
@@ -922,12 +922,12 @@ impl<'a> FilesystemManager<'a> {
         }
         
         // Convert API paths to actual container paths
-        // "/" maps to "/workspace" (the working directory)
-        // "/something" maps to "/workspace/something"
+        // "/" maps to "/home/container" (the container's data directory)
+        // "/something" maps to "/home/container/something"
         let final_path = if safe_path == "/" {
-            "/workspace".to_string()
+            "/home/container".to_string()
         } else {
-            format!("/workspace{}", safe_path)
+            format!("/home/container{}", safe_path)
         };
         
         Ok(final_path)

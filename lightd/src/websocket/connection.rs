@@ -1,451 +1,479 @@
+//! WebSocket connection handler
+//!
+//! Channel-based WebSocket that stays alive and streams logs when container is running.
+//! Uses Docker Events API for efficient real-time container state monitoring.
+//! Also streams container stats (CPU, memory, network) when running.
+//! DO NOT MODIFY THIS FILE WITHOUT UPDATING THE TEST SCRIPT IN `lightd/examples/test_websocket.sh`
+
 use axum::extract::ws::{Message, WebSocket};
-use futures_util::{SinkExt, StreamExt, stream::SplitSink};
-use serde_json::Value;
+use bollard::container::{LogOutput, LogsOptions, StatsOptions};
+use bollard::system::EventsOptions;
+use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
-use tracing::{error, info, warn};
+use std::time::{Duration, SystemTime};
+use tokio::sync::mpsc;
+use tokio::time::Instant;
+use tracing::{debug, info, warn};
 
-use crate::{
-    models::{WebSocketMessage, ContainerStats},
-    types::AppState,
-    docker::ContainerManager,
-    websocket::WebSocketToken,
-};
+use crate::types::AppState;
+use super::{WebSocketToken, WsMessage};
 
-type WebSocketSender = SplitSink<WebSocket, Message>;
+/// Calculate "since" timestamp for docker logs
+#[inline]
+fn docker_since(mins: u64) -> i64 {
+    if mins == 0 {
+        return SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+    }
 
+    SystemTime::now()
+        .checked_sub(Duration::from_secs(mins * 60))
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Container state events
+#[derive(Debug, Clone)]
+enum ContainerEvent {
+    Started,
+    Stopped,
+    Died,
+}
+
+/// Simplified container stats for WebSocket transmission
+#[derive(Debug, Clone, Serialize)]
+pub struct ContainerStats {
+    pub memory_bytes: u64,
+    pub memory_limit_bytes: u64,
+    pub cpu_absolute: f64,
+    pub network: NetworkStats,
+    pub uptime: u64,
+    pub state: String,
+    pub disk_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkStats {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// WebSocket connection - channel-based, stays alive
 pub struct WebSocketConnection {
     pub token: WebSocketToken,
     pub socket: WebSocket,
     pub state: Arc<AppState>,
-    pub stats_rx: broadcast::Receiver<ContainerStats>,
-    pub logs_rx: broadcast::Receiver<String>,
-    pub status_rx: broadcast::Receiver<String>,
 }
 
 impl WebSocketConnection {
-    pub fn new(
-        token: WebSocketToken,
-        socket: WebSocket,
-        state: Arc<AppState>,
-        stats_rx: broadcast::Receiver<ContainerStats>,
-        logs_rx: broadcast::Receiver<String>,
-        status_rx: broadcast::Receiver<String>,
-    ) -> Self {
-        Self {
-            token,
-            socket,
-            state,
-            stats_rx,
-            logs_rx,
-            status_rx,
-        }
+    pub fn new(token: WebSocketToken, socket: WebSocket, state: Arc<AppState>) -> Self {
+        Self { token, socket, state }
     }
 
+    /// Check initial container state
+    async fn check_initial_state(docker: &bollard::Docker, container_id: &str) -> bool {
+        docker
+            .inspect_container(container_id, None)
+            .await
+            .ok()
+            .and_then(|info| info.state)
+            .and_then(|s| s.running)
+            .unwrap_or(false)
+    }
+
+    /// Get container start time for uptime calculation
+    async fn get_container_start_time(docker: &bollard::Docker, container_id: &str) -> Option<i64> {
+        docker
+            .inspect_container(container_id, None)
+            .await
+            .ok()
+            .and_then(|info| info.state)
+            .and_then(|s| s.started_at)
+            .and_then(|started| {
+                // Parse ISO 8601 timestamp
+                chrono::DateTime::parse_from_rfc3339(&started)
+                    .ok()
+                    .map(|dt| dt.timestamp())
+            })
+    }
+
+    /// Calculate CPU percentage from stats
+    fn calculate_cpu_percent(
+        cpu_delta: u64,
+        system_delta: u64,
+        num_cpus: u64,
+    ) -> f64 {
+        if system_delta == 0 || num_cpus == 0 {
+            return 0.0;
+        }
+        ((cpu_delta as f64 / system_delta as f64) * num_cpus as f64 * 100.0 * 100.0).round() / 100.0
+    }
+
+    /// Spawn Docker events listener for this specific container
+    async fn spawn_event_listener(
+        docker: Arc<bollard::Docker>,
+        container_id: String,
+    ) -> mpsc::UnboundedReceiver<ContainerEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            let mut filters = HashMap::new();
+            filters.insert("container".to_string(), vec![container_id.clone()]);
+            filters.insert("type".to_string(), vec!["container".to_string()]);
+            filters.insert("event".to_string(), vec![
+                "start".to_string(),
+                "die".to_string(),
+                "stop".to_string(),
+            ]);
+
+            let options = EventsOptions {
+                since: Some(docker_since(0).to_string()),
+                filters,
+                ..Default::default()
+            };
+
+            let mut event_stream = docker.events(Some(options));
+
+            while let Some(event_result) = event_stream.next().await {
+                match event_result {
+                    Ok(event) => {
+                        let container_event = match event.action.as_deref() {
+                            Some("start") => Some(ContainerEvent::Started),
+                            Some("die") | Some("stop") => Some(ContainerEvent::Stopped),
+                            _ => None,
+                        };
+
+                        if let Some(ce) = container_event {
+                            if tx.send(ce).is_err() {
+                                debug!("Event receiver dropped, stopping listener");
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Docker events stream error: {}", e);
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+
+            debug!("Docker events listener stopped for: {}", container_id);
+        });
+
+        rx
+    }
+
+    /// Main handler - keeps websocket alive as a channel
     pub async fn handle(self) {
-        info!("WebSocket connection established for container: {}", self.token.container_id);
-        
-        let (sender, mut receiver) = self.socket.split();
-        let sender = Arc::new(Mutex::new(sender));
-        
-        // Extract values from self before moving
-        let token = self.token;
-        let state = self.state;
-        let mut stats_rx = self.stats_rx;
-        let mut logs_rx = self.logs_rx;
-        let mut status_rx = self.status_rx;
-        
-        // Send initial status
-        {
-            let mut sender_guard = sender.lock().await;
-            if let Err(e) = Self::send_initial_status_static(&token, &state, &mut *sender_guard).await {
-                error!("Failed to send initial status: {}", e);
-                return;
-            }
-        }
+        let container_id = self.token.container_id.clone();
+        let container_uuid = self.token.container_uuid.clone();
+        let docker = Arc::new(self.state.docker.client.clone());
 
-        // Spawn tasks for different event streams
-        let sender_clone1 = sender.clone();
-        let sender_clone2 = sender.clone();
-        let sender_clone3 = sender.clone();
-        
-        // Stats broadcasting task
-        let stats_task = tokio::spawn(async move {
-            while let Ok(stats) = stats_rx.recv().await {
-                let message = WebSocketMessage {
-                    event: "stats".to_string(),
-                    args: vec![serde_json::to_string(&stats).unwrap_or_default()],
-                };
-                
-                if let Ok(json) = serde_json::to_string(&message) {
-                    if let Err(e) = sender_clone1.lock().await.send(Message::Text(json)).await {
-                        error!("Failed to send stats: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
+        info!("WebSocket channel opened for container: {} ({})", container_uuid, container_id);
 
-        // Logs broadcasting task
-        let logs_task = tokio::spawn(async move {
-            while let Ok(log_line) = logs_rx.recv().await {
-                let message = WebSocketMessage {
-                    event: "console output".to_string(),
-                    args: vec![log_line],
-                };
-                
-                if let Ok(json) = serde_json::to_string(&message) {
-                    if let Err(e) = sender_clone2.lock().await.send(Message::Text(json)).await {
-                        error!("Failed to send log: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
+        let (mut tx, mut rx) = self.socket.split();
 
-        // Status broadcasting task
-        let status_task = tokio::spawn(async move {
-            while let Ok(status) = status_rx.recv().await {
-                let message = WebSocketMessage {
-                    event: "status".to_string(),
-                    args: vec![status],
-                };
-                
-                if let Ok(json) = serde_json::to_string(&message) {
-                    if let Err(e) = sender_clone3.lock().await.send(Message::Text(json)).await {
-                        error!("Failed to send status: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Handle incoming messages
-        let container_id = token.container_id.clone();
-        let state_clone = state.clone();
-        
-        while let Some(msg) = receiver.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    let mut sender_guard = sender.lock().await;
-                    if let Err(e) = Self::handle_incoming_message_static(&text, &container_id, &state_clone, &mut *sender_guard).await {
-                        error!("Error handling message: {}", e);
-                    }
-                }
-                Ok(Message::Close(_)) => {
-                    info!("WebSocket connection closed for container: {}", container_id);
-                    break;
-                }
-                Err(e) => {
-                    error!("WebSocket error: {}", e);
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        // Clean up tasks
-        stats_task.abort();
-        logs_task.abort();
-        status_task.abort();
-        
-        info!("WebSocket connection ended for container: {}", container_id);
-    }
-
-    async fn send_initial_status(&self, sender: &mut WebSocketSender) -> anyhow::Result<()> {
-        Self::send_initial_status_static(&self.token, &self.state, sender).await
-    }
-
-    async fn send_initial_status_static(token: &WebSocketToken, state: &Arc<AppState>, sender: &mut WebSocketSender) -> anyhow::Result<()> {
         // Get current container status
-        let state_manager = state.state_manager.lock().await;
-        let status = if let Some((_, container_state)) = state_manager.find_by_container_id(&token.container_id) {
-            container_state.state.clone()
-        } else {
-            "unknown".to_string()
-        };
-        drop(state_manager);
-
-        let message = WebSocketMessage {
-            event: "status".to_string(),
-            args: vec![status],
+        let current_status = {
+            let sm = self.state.state_manager.lock().await;
+            sm.get_container(&container_uuid)
+                .map(|cs| cs.state.clone())
+                .unwrap_or_else(|| "offline".to_string())
         };
 
-        let json = serde_json::to_string(&message)?;
-        sender.send(Message::Text(json)).await?;
-        
-        Ok(())
-    }
-
-    async fn handle_incoming_message(
-        &self,
-        text: &str,
-        container_id: &str,
-        state: &AppState,
-        sender: &mut WebSocketSender,
-    ) -> anyhow::Result<()> {
-        Self::handle_incoming_message_static(text, container_id, state, sender).await
-    }
-
-    async fn handle_incoming_message_static(
-        text: &str,
-        container_id: &str,
-        state: &AppState,
-        sender: &mut WebSocketSender,
-    ) -> anyhow::Result<()> {
-        let message: WebSocketMessage = serde_json::from_str(text)?;
-        
-        match message.event.as_str() {
-            "send command" => {
-                if let Some(command) = message.args.first() {
-                    Self::handle_command_static(container_id, command, state, sender).await?;
-                }
-            }
-            "power" => {
-                if let Some(action) = message.args.first() {
-                    Self::handle_power_action_static(container_id, action, state, sender).await?;
-                }
-            }
-            "request stats" => {
-                Self::send_current_stats_static(container_id, state, sender).await?;
-            }
-            _ => {
-                warn!("Unknown WebSocket event: {}", message.event);
-            }
+        // Send init message
+        let init_msg = WsMessage::init(&container_id, &container_uuid, &current_status);
+        if tx.send(Message::Text(init_msg.to_json())).await.is_err() {
+            warn!("Failed to send init message, closing connection");
+            return;
         }
-        
-        Ok(())
-    }
 
-    async fn handle_command(
-        &self,
-        container_id: &str,
-        command: &str,
-        state: &AppState,
-        sender: &mut WebSocketSender,
-    ) -> anyhow::Result<()> {
-        Self::handle_command_static(container_id, command, state, sender).await
-    }
+        info!("Sent init message, container status: {}", current_status);
 
-    async fn handle_command_static(
-        container_id: &str,
-        command: &str,
-        state: &AppState,
-        sender: &mut WebSocketSender,
-    ) -> anyhow::Result<()> {
-        info!("Executing command in container {}: {}", container_id, command);
-        
-        // Check if container is suspended
-        let state_manager = state.state_manager.lock().await;
-        if let Some((uuid, _)) = state_manager.find_by_container_id(container_id) {
-            if state_manager.is_container_suspended(uuid) {
-                let error_msg = WebSocketMessage {
-                    event: "error".to_string(),
-                    args: vec!["Cannot execute commands in suspended container".to_string()],
-                };
-                let json = serde_json::to_string(&error_msg)?;
-                sender.send(Message::Text(json)).await?;
-                return Ok(());
-            }
+        // Check initial state and spawn event listener
+        let is_running = Self::check_initial_state(&docker, &container_id).await;
+        let mut event_rx = Self::spawn_event_listener(docker.clone(), container_id.clone()).await;
+
+        const PING_INTERVAL: Duration = Duration::from_secs(30);
+        const STATS_INTERVAL: Duration = Duration::from_secs(1);
+        let mut last_ping = Instant::now();
+        let mut last_stats = Instant::now();
+        let mut log_stream: Option<_> = None;
+        let mut stats_stream: Option<_> = None;
+        let mut current_running = is_running;
+        let mut container_start_time: Option<i64> = None;
+
+        // Start log and stats streams if container is already running
+        if is_running {
+            let log_options = LogsOptions::<String> {
+                follow: true,
+                stdout: true,
+                stderr: true,
+                since: docker_since(0),
+                timestamps: false,
+                ..Default::default()
+            };
+            log_stream = Some(docker.logs(&container_id, Some(log_options)));
+            
+            // Start stats stream (streaming mode)
+            let stats_options = StatsOptions {
+                stream: true,
+                one_shot: false,
+            };
+            stats_stream = Some(docker.stats(&container_id, Some(stats_options)));
+            container_start_time = Self::get_container_start_time(&docker, &container_id).await;
+            
+            let _ = tx.send(Message::Text(WsMessage::status("running").to_json())).await;
         }
-        drop(state_manager);
 
-        let manager = ContainerManager::new(state.docker.client());
-        
-        // Use timeout version to prevent blocking - 10 second timeout for command output
-        match manager.exec_command_with_timeout(container_id, vec!["sh", "-c", command], 10).await {
-            Ok(output) => {
-                let response = WebSocketMessage {
-                    event: "command response".to_string(),
-                    args: vec![output],
-                };
-                let json = serde_json::to_string(&response)?;
-                sender.send(Message::Text(json)).await?;
-            }
-            Err(e) => {
-                let error_msg = WebSocketMessage {
-                    event: "error".to_string(),
-                    args: vec![format!("Command execution failed: {}", e)],
-                };
-                let json = serde_json::to_string(&error_msg)?;
-                sender.send(Message::Text(json)).await?;
-            }
-        }
-        
-        Ok(())
-    }
+        loop {
+            tokio::select! {
+                biased;
 
-    async fn handle_power_action(
-        &self,
-        container_id: &str,
-        action: &str,
-        state: &AppState,
-        sender: &mut WebSocketSender,
-    ) -> anyhow::Result<()> {
-        Self::handle_power_action_static(container_id, action, state, sender).await
-    }
+                // Docker events - most efficient way to detect state changes
+                event = event_rx.recv() => {
+                    match event {
+                        Some(ContainerEvent::Started) if !current_running => {
+                            info!("Container {} started (via event)", container_id);
+                            current_running = true;
 
-    async fn handle_power_action_static(
-        container_id: &str,
-        action: &str,
-        state: &AppState,
-        sender: &mut WebSocketSender,
-    ) -> anyhow::Result<()> {
-        info!("Power action for container {}: {}", container_id, action);
-        
-        let manager = ContainerManager::new(state.docker.client());
-        let result = match action {
-            "start" => manager.start(container_id).await,
-            "stop" => manager.stop(container_id).await,
-            "restart" => {
-                manager.stop(container_id).await?;
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                manager.start(container_id).await
-            }
-            "kill" => manager.kill(container_id).await,
-            _ => {
-                let error_msg = WebSocketMessage {
-                    event: "error".to_string(),
-                    args: vec![format!("Unknown power action: {}", action)],
-                };
-                let json = serde_json::to_string(&error_msg)?;
-                sender.send(Message::Text(json)).await?;
-                return Ok(());
-            }
-        };
+                            let _ = tx.send(Message::Text(WsMessage::status("running").to_json())).await;
+                            let _ = tx.send(Message::Text(
+                                WsMessage::daemon_message("Container started, streaming logs...").to_json()
+                            )).await;
 
-        let response = match result {
-            Ok(_) => WebSocketMessage {
-                event: "power response".to_string(),
-                args: vec![format!("Power action '{}' completed successfully", action)],
-            },
-            Err(e) => WebSocketMessage {
-                event: "error".to_string(),
-                args: vec![format!("Power action '{}' failed: {}", action, e)],
-            },
-        };
+                            // Start log stream
+                            let log_options = LogsOptions::<String> {
+                                follow: true,
+                                stdout: true,
+                                stderr: true,
+                                since: docker_since(0),
+                                timestamps: false,
+                                ..Default::default()
+                            };
+                            log_stream = Some(docker.logs(&container_id, Some(log_options)));
+                            
+                            // Start stats stream
+                            let stats_options = StatsOptions {
+                                stream: true,
+                                one_shot: false,
+                            };
+                            stats_stream = Some(docker.stats(&container_id, Some(stats_options)));
+                            container_start_time = Self::get_container_start_time(&docker, &container_id).await;
+                        }
+                        Some(ContainerEvent::Stopped) | Some(ContainerEvent::Died) if current_running => {
+                            info!("Container {} stopped (via event)", container_id);
+                            current_running = false;
 
-        let json = serde_json::to_string(&response)?;
-        sender.send(Message::Text(json)).await?;
-        
-        Ok(())
-    }
+                            let _ = tx.send(Message::Text(WsMessage::status("stopped").to_json())).await;
+                            let _ = tx.send(Message::Text(
+                                WsMessage::daemon_message("Container stopped").to_json()
+                            )).await;
 
-    async fn send_current_stats(
-        &self,
-        container_id: &str,
-        state: &AppState,
-        sender: &mut WebSocketSender,
-    ) -> anyhow::Result<()> {
-        Self::send_current_stats_static(container_id, state, sender).await
-    }
-
-    async fn send_current_stats_static(
-        container_id: &str,
-        state: &AppState,
-        sender: &mut WebSocketSender,
-    ) -> anyhow::Result<()> {
-        let manager = ContainerManager::new(state.docker.client());
-        
-        match manager.get_stats(container_id).await {
-            Ok(stats_json) => {
-                // Parse Docker stats and convert to our format
-                if let Ok(docker_stats) = serde_json::from_str::<Value>(&stats_json) {
-                    let stats = Self::convert_docker_stats_to_container_stats_static(&docker_stats, container_id, state).await;
-                    
-                    let message = WebSocketMessage {
-                        event: "stats".to_string(),
-                        args: vec![serde_json::to_string(&stats)?],
-                    };
-                    
-                    let json = serde_json::to_string(&message)?;
-                    sender.send(Message::Text(json)).await?;
-                }
-            }
-            Err(e) => {
-                let error_msg = WebSocketMessage {
-                    event: "error".to_string(),
-                    args: vec![format!("Failed to get stats: {}", e)],
-                };
-                let json = serde_json::to_string(&error_msg)?;
-                sender.send(Message::Text(json)).await?;
-            }
-        }
-        
-        Ok(())
-    }
-
-    async fn convert_docker_stats_to_container_stats(
-        &self,
-        docker_stats: &Value,
-        container_id: &str,
-        state: &AppState,
-    ) -> ContainerStats {
-        Self::convert_docker_stats_to_container_stats_static(docker_stats, container_id, state).await
-    }
-
-    async fn convert_docker_stats_to_container_stats_static(
-        docker_stats: &Value,
-        container_id: &str,
-        state: &AppState,
-    ) -> ContainerStats {
-        let memory_usage = docker_stats["memory_stats"]["usage"].as_u64().unwrap_or(0);
-        let memory_limit = docker_stats["memory_stats"]["limit"].as_u64().unwrap_or(0);
-        
-        let cpu_delta = docker_stats["cpu_stats"]["cpu_usage"]["total_usage"].as_u64().unwrap_or(0) as f64
-            - docker_stats["precpu_stats"]["cpu_usage"]["total_usage"].as_u64().unwrap_or(0) as f64;
-        let system_delta = docker_stats["cpu_stats"]["system_cpu_usage"].as_u64().unwrap_or(0) as f64
-            - docker_stats["precpu_stats"]["system_cpu_usage"].as_u64().unwrap_or(0) as f64;
-        let cpu_count = docker_stats["cpu_stats"]["online_cpus"].as_u64().unwrap_or(1) as f64;
-        
-        let cpu_percent = if system_delta > 0.0 && cpu_delta > 0.0 {
-            (cpu_delta / system_delta) * cpu_count * 100.0
-        } else {
-            0.0
-        };
-
-        let rx_bytes = docker_stats["networks"]["eth0"]["rx_bytes"].as_u64().unwrap_or(0);
-        let tx_bytes = docker_stats["networks"]["eth0"]["tx_bytes"].as_u64().unwrap_or(0);
-
-        // Get REAL state from Docker, not from state_manager
-        let container_state = match state.docker.client.inspect_container(container_id, None).await {
-            Ok(info) => {
-                if let Some(state_info) = info.state {
-                    if state_info.paused.unwrap_or(false) {
-                        "paused".to_string()
-                    } else if state_info.running.unwrap_or(false) {
-                        "running".to_string()
-                    } else if state_info.restarting.unwrap_or(false) {
-                        "restarting".to_string()
-                    } else if state_info.dead.unwrap_or(false) {
-                        "dead".to_string()
-                    } else {
-                        state_info.status.map(|s| s.to_string()).unwrap_or_else(|| "stopped".to_string())
+                            log_stream = None;
+                            stats_stream = None;
+                            container_start_time = None;
+                        }
+                        None => {
+                            warn!("Event listener died, reconnecting...");
+                            event_rx = Self::spawn_event_listener(docker.clone(), container_id.clone()).await;
+                        }
+                        _ => {}
                     }
-                } else {
-                    "unknown".to_string()
+                }
+
+                // Stream logs if active
+                log_result = async {
+                    match log_stream.as_mut() {
+                        Some(stream) => stream.next().await,
+                        None => {
+                            // No active stream, yield briefly
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            None
+                        }
+                    }
+                } => {
+                    if let Some(result) = log_result {
+                        match result {
+                            Ok(log_output) => {
+                                let message_bytes = match log_output {
+                                    LogOutput::StdOut { message } |
+                                    LogOutput::StdErr { message } |
+                                    LogOutput::Console { message } |
+                                    LogOutput::StdIn { message } => message,
+                                };
+
+                                let message = String::from_utf8_lossy(&message_bytes);
+                                
+                                for line in message.lines() {
+                                    let line = line.trim();
+                                    if !line.is_empty() {
+                                        let msg = WsMessage::console_output(line).to_json();
+                                        if tx.send(Message::Text(msg)).await.is_err() {
+                                            debug!("Client disconnected while sending log");
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Docker logs error: {}", e);
+                                log_stream = None;
+                            }
+                        }
+                    }
+                }
+
+                // Stream stats if active (throttled to avoid flooding)
+                stats_result = async {
+                    match stats_stream.as_mut() {
+                        Some(stream) if last_stats.elapsed() >= STATS_INTERVAL => {
+                            stream.next().await
+                        }
+                        Some(_) => {
+                            // Throttle stats - wait until interval passes
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            None
+                        }
+                        None => {
+                            // No active stream, yield briefly
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            None
+                        }
+                    }
+                } => {
+                    if let Some(result) = stats_result {
+                        match result {
+                            Ok(stats) => {
+                                last_stats = Instant::now();
+                                
+                                // Extract memory stats (memory_stats is a direct struct, usage/limit are Option<u64>)
+                                let memory_bytes = stats.memory_stats.usage.unwrap_or(0);
+                                let memory_limit_bytes = stats.memory_stats.limit.unwrap_or(0);
+                                
+                                // Calculate CPU percentage (cpu_stats and precpu_stats are direct structs)
+                                let cpu_absolute = {
+                                    let cpu = &stats.cpu_stats;
+                                    let precpu = &stats.precpu_stats;
+                                    
+                                    let cpu_delta = cpu.cpu_usage.total_usage
+                                        .saturating_sub(precpu.cpu_usage.total_usage);
+                                    
+                                    let system_delta = cpu.system_cpu_usage.unwrap_or(0)
+                                        .saturating_sub(precpu.system_cpu_usage.unwrap_or(0));
+                                    
+                                    let num_cpus = cpu.online_cpus
+                                        .or_else(|| cpu.cpu_usage.percpu_usage.as_ref().map(|p| p.len() as u64))
+                                        .unwrap_or(1);
+                                    
+                                    Self::calculate_cpu_percent(cpu_delta, system_delta, num_cpus)
+                                };
+                                
+                                // Calculate network stats (aggregate all interfaces)
+                                let (rx_bytes, tx_bytes) = stats.networks
+                                    .as_ref()
+                                    .map(|networks| {
+                                        networks.values().fold((0u64, 0u64), |(rx, tx), net| {
+                                            (rx + net.rx_bytes, tx + net.tx_bytes)
+                                        })
+                                    })
+                                    .unwrap_or((0, 0));
+                                
+                                // Calculate uptime
+                                let uptime = container_start_time
+                                    .map(|start| {
+                                        let now = SystemTime::now()
+                                            .duration_since(SystemTime::UNIX_EPOCH)
+                                            .map(|d| d.as_secs() as i64)
+                                            .unwrap_or(0);
+                                        (now - start).max(0) as u64
+                                    })
+                                    .unwrap_or(0);
+                                
+                                // Get disk usage from blkio stats (blkio_stats is a direct struct)
+                                let disk_bytes = stats.blkio_stats.io_service_bytes_recursive
+                                    .as_ref()
+                                    .map(|entries| {
+                                        entries.iter()
+                                            .filter(|e| e.op == "write" || e.op == "Write")
+                                            .map(|e| e.value)
+                                            .sum()
+                                    })
+                                    .unwrap_or(0);
+                                
+                                let container_stats = ContainerStats {
+                                    memory_bytes,
+                                    memory_limit_bytes,
+                                    cpu_absolute,
+                                    network: NetworkStats { rx_bytes, tx_bytes },
+                                    uptime,
+                                    state: "running".to_string(),
+                                    disk_bytes,
+                                };
+                                
+                                if let Ok(stats_json) = serde_json::to_string(&container_stats) {
+                                    let msg = WsMessage::stats(&stats_json).to_json();
+                                    if tx.send(Message::Text(msg)).await.is_err() {
+                                        debug!("Client disconnected while sending stats");
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Docker stats error: {}", e);
+                                stats_stream = None;
+                            }
+                        }
+                    }
+                }
+
+                // Handle client messages
+                client_msg = rx.next() => {
+                    match client_msg {
+                        Some(Ok(Message::Close(_))) => {
+                            info!("Client closed connection for: {}", container_uuid);
+                            break;
+                        }
+                        Some(Ok(Message::Ping(data))) => {
+                            let _ = tx.send(Message::Pong(data)).await;
+                        }
+                        Some(Ok(Message::Pong(_))) => {
+                            // Connection alive
+                        }
+                        Some(Ok(Message::Text(text))) => {
+                            debug!("Received client message: {}", text);
+                            // TODO: Add command handling
+                        }
+                        Some(Err(e)) => {
+                            debug!("Client error: {}", e);
+                            break;
+                        }
+                        None => {
+                            debug!("Client disconnected");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Periodic ping
+                _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                    if last_ping.elapsed() >= PING_INTERVAL {
+                        if tx.send(Message::Ping(vec![1, 2, 3])).await.is_err() {
+                            debug!("Ping failed, client disconnected");
+                            break;
+                        }
+                        last_ping = Instant::now();
+                    }
                 }
             }
-            Err(_) => "offline".to_string(),
-        };
-
-        // Check if suspended in our state manager
-        let is_suspended = {
-            let state_manager = state.state_manager.lock().await;
-            state_manager.find_by_container_id(container_id)
-                .map(|(uuid, _)| state_manager.is_container_suspended(uuid))
-                .unwrap_or(false)
-        };
-
-        ContainerStats {
-            memory_bytes: memory_usage,
-            memory_limit_bytes: memory_limit,
-            cpu_absolute: cpu_percent,
-            network: crate::models::NetworkStats { rx_bytes, tx_bytes },
-            uptime: 0, // Would need to calculate from container start time
-            state: container_state,
-            disk_bytes: 0, // Would need additional Docker API calls
-            is_suspended,
         }
+
+        info!("WebSocket channel closed for container: {}", container_uuid);
     }
 }

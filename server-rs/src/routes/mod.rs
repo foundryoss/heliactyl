@@ -6,3 +6,5 @@ pub mod audit;
 pub mod tenants;
 pub mod servers;
 pub mod billing;
+pub mod admin;
+pub mod wallet;

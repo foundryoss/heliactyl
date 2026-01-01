@@ -1,0 +1,37 @@
+{
+    "_note": "don't mess with ts twin, it's very messy.",
+    "exported_at": "2024-12-11T19:05:06+00:00",
+    "name": "Node.js",
+    "icon_url": "https://cdn.jsdelivr.net/gh/devicons/devicon/icons/nodejs/nodejs-original.svg",
+    "docker_images": {
+         "node_18": "alpine:latest"
+    },
+    "startup_cmd": "touch /tmp/node.tmp && node ${FILE_TO_RUN}",
+    "install_content": "apk add --no-cache curl nodejs npm \nmkdir -p /home/container \ncd /home/container \nnpm install typescript ts-node @types"
+,
+    "update_content" : "npm install -g npm \nnpm install typescript ts-node @types\/node",
+    "runtime": {
+        "file-init": "printf \"export const app = {\\n  address: \\\"%s\\\",\\n  port: %s,\\n  host: \\\"%s\\\",\\n};\\n\" \\\n\"${SERVER_ADDRESS:-0.0.0.0}\" \\\n\"${SERVER_PORT:-3000}\" \\\n\"${SERVER_HOST:-localhost}\" > app.ts",
+        "start-up": "Node.js app started.",
+        "stop": "^^C",
+        "_note": "start-up detects if a container has started or not via logs."
+    },
+    "networking": {
+        "port_binds": {
+            "3000": "auto",
+            "8080": "auto"
+        }
+    },
+    "variables": [
+        {
+            "name": "File to run",
+            "description": "",
+            "env_variable": "FILE_TO_RUN",
+            "default_value": "app.ts",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string",
+            "field_type": "text"
+        }
+    ]
+}

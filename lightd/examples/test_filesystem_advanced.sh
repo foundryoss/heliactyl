@@ -10,6 +10,10 @@ CONTAINER_UUID=""
 CONTAINER_ID=""
 
 echo "=== lightd Advanced Filesystem Operations Test ==="
+echo ""
+echo "NOTE: All file operations work within /home/container"
+echo "      This directory is automatically bind-mounted from ./storage/volumes/<container-uuid>"
+echo ""
 
 # Function to make HTTP requests with error handling
 make_request() {
@@ -349,3 +353,6 @@ echo "✓ Performance testing with multiple files"
 echo "✓ Cleanup operations"
 echo ""
 echo "All advanced filesystem operations are working correctly!"
+echo ""
+echo "Container volume location: ./storage/volumes/$CONTAINER_UUID"
+echo "You can inspect the files directly on the host at that location."

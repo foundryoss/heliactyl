@@ -402,9 +402,7 @@ export function ConsolePage() {
         setCommand('')
     }, [connected])
 
-    const sendPowerAction = useCallback((action: string) => {
-        if (!wsRef.current || !connected) return
-
+    const sendPowerAction = useCallback(async (action: string) => {
         const actionNames: Record<string, string> = {
             start: 'Starting',
             stop: 'Stopping', 
@@ -412,13 +410,43 @@ export function ConsolePage() {
             kill: 'Force stopping'
         }
 
-        wsRef.current.send(JSON.stringify({
-            event: 'set state',
-            args: [action]
-        }))
+        // Try WebSocket first if connected
+        if (wsRef.current && connected) {
+            wsRef.current.send(JSON.stringify({
+                event: 'set state',
+                args: [action]
+            }))
+            notify({ description: `${actionNames[action] || action} server...`, type: 'success' })
+            return
+        }
 
-        notify({ description: `${actionNames[action] || action} server...`, type: 'success' })
-    }, [connected, notify])
+        // Fallback to HTTP API
+        if (!selectedTenantId || !serverId) return
+        
+        try {
+            notify({ description: `${actionNames[action] || action} server...`, type: 'success' })
+            
+            switch (action) {
+                case 'start':
+                    await api.servers.start(selectedTenantId, serverId)
+                    break
+                case 'stop':
+                    await api.servers.stop(selectedTenantId, serverId)
+                    break
+                case 'restart':
+                    await api.servers.restart(selectedTenantId, serverId)
+                    break
+                case 'kill':
+                    await api.servers.kill(selectedTenantId, serverId)
+                    break
+            }
+            
+            // Refresh server state after action
+            setTimeout(() => loadServer(), 1000)
+        } catch (e: any) {
+            notify({ description: e?.message || `Failed to ${action} server`, type: 'error' })
+        }
+    }, [connected, api, selectedTenantId, serverId, notify, loadServer])
 
     const handleCommandSubmit = useCallback((e: React.FormEvent) => {
         e.preventDefault()
@@ -465,9 +493,11 @@ export function ConsolePage() {
     }, [])
 
     const getPowerButton = useCallback(() => {
-        const isOffline = serverStatus === 'offline'
-        const isStarting = serverStatus === 'starting'
-        const isStopping = serverStatus === 'stopping'
+        const status = serverStatus || server?.state || 'unknown'
+        const isOffline = status === 'offline' || status === 'stopped' || status === 'exited'
+        const isStarting = status === 'starting' || status === 'installing'
+        const isStopping = status === 'stopping'
+        const isRunning = status === 'running' || status === 'ready'
 
         if (isOffline || isStopping) {
             return (
@@ -475,7 +505,7 @@ export function ConsolePage() {
                     variant="ghost"
                     size="sm"
                     onClick={() => sendPowerAction('start')}
-                    disabled={!connected || isStarting}
+                    disabled={isStarting}
                     className="text-green-600 hover:text-green-900 dark:text-green-400"
                 >
                     <PlayIcon className="w-4 h-4" />
@@ -490,7 +520,7 @@ export function ConsolePage() {
                     variant="ghost"
                     size="sm"
                     onClick={() => sendPowerAction('restart')}
-                    disabled={!connected || isOffline}
+                    disabled={isOffline}
                     className="text-orange-600 flex items-center gap-1 hover:text-orange-900 dark:text-orange-400"
                 >
                     <ArrowPathIcon className="w-4 h-4" />
@@ -501,7 +531,6 @@ export function ConsolePage() {
                         variant="ghost"
                         size="sm"
                         onClick={() => sendPowerAction('kill')}
-                        disabled={!connected}
                         className="text-red-600 flex items-center gap-1 hover:text-red-900 dark:text-red-400"
                     >
                         <XMarkIcon className="w-4 h-4" />
@@ -512,7 +541,7 @@ export function ConsolePage() {
                         variant="ghost"
                         size="sm"
                         onClick={() => sendPowerAction('stop')}
-                        disabled={!connected || isOffline}
+                        disabled={isOffline}
                         className="text-red-600 flex items-center gap-1 hover:text-red-900 dark:text-red-400"
                     >
                         <StopIcon className="w-4 h-4" />
@@ -521,7 +550,7 @@ export function ConsolePage() {
                 )}
             </>
         )
-    }, [connected, serverStatus, sendPowerAction])
+    }, [server, serverStatus, sendPowerAction])
 
     useEffect(() => {
         loadServer()

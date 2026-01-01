@@ -12,6 +12,13 @@ impl SessionManager {
         Ok(Self { redis })
     }
 
+    /// Ping Redis to check connection
+    pub fn ping(&self) -> Result<(), RedisError> {
+        let mut conn = self.redis.client.get_connection()?;
+        let _: String = redis::cmd("PING").query(&mut conn)?;
+        Ok(())
+    }
+
     /// Create a new session token for a user
     pub fn create_session(&self, user_id: &str, expiry_days: u64) -> Result<String, RedisError> {
     let token = Uuid::new_v4().to_string();

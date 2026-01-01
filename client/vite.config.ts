@@ -14,6 +14,8 @@ export default defineConfig({
 			'/api/tenants': { target: 'http://localhost:8787', changeOrigin: true },
 			'/api/admin': { target: 'http://localhost:8787', changeOrigin: true },
 			'/api/core': { target: 'http://localhost:8787', changeOrigin: true },
+			'/api/wallet': { target: 'http://localhost:8787', changeOrigin: true },
+			'/api/billing': { target: 'http://localhost:8787', changeOrigin: true },
 		},
 	},
 	resolve: {

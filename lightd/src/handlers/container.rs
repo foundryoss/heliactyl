@@ -88,9 +88,51 @@ pub async fn create_container(
     }
     
     let manager = ContainerManager::new(state.docker.client());
-    match manager.create_with_networking(req.clone(), &state.network, &custom_uuid).await {
+    let volumes_path = &state.config.storage.volumes_path;
+    
+    // Always use entrypoint.sh as the container command
+    let mut create_req = req.clone();
+    create_req.startup_command = Some(vec!["/bin/sh".to_string(), "/data/entrypoint.sh".to_string()]);
+    
+    // Store startup command for later use after install
+    // Handle "sh -c <command>" format - extract just the command part
+    let startup_cmd = req.startup_command.clone()
+        .map(|cmd| {
+            if cmd.len() >= 3 && (cmd[0] == "sh" || cmd[0] == "/bin/sh") && cmd[1] == "-c" {
+                // Extract the actual command (everything after "sh -c")
+                cmd[2..].join(" ")
+            } else {
+                cmd.join(" ")
+            }
+        })
+        .unwrap_or_else(|| "sleep infinity".to_string());
+    
+    // Initial entrypoint content - just the install script or startup command (raw, no shebang)
+    let entrypoint_content = if let Some(install_script) = &req.install_content {
+        install_script.clone()
+    } else {
+        startup_cmd.clone()
+    };
+    
+    // Create data directory and write entrypoint BEFORE creating container
+    let data_path = format!("{}/{}_data", volumes_path, custom_uuid);
+    if let Err(e) = tokio::fs::create_dir_all(&data_path).await {
+        error!("Failed to create data directory: {}", e);
+        return Ok(Json(ApiResponse::error(format!("Failed to create data dir: {}", e))));
+    }
+    let entrypoint_path = format!("{}/entrypoint.sh", data_path);
+    if let Err(e) = tokio::fs::write(&entrypoint_path, &entrypoint_content).await {
+        error!("Failed to write entrypoint.sh: {}", e);
+        return Ok(Json(ApiResponse::error(format!("Failed to write entrypoint: {}", e))));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&entrypoint_path, std::fs::Permissions::from_mode(0o755));
+    }
+    
+    match manager.create_with_networking(create_req, &state.network, &custom_uuid, volumes_path).await {
         Ok((container_id, allocations)) => {
-            // Update daemon state with container ID and status
             if let Err(e) = state.state_manager.lock().await.update_container_id(&custom_uuid, &container_id).await {
                 error!("Failed to update container ID in daemon state: {}", e);
             }
@@ -98,7 +140,7 @@ pub async fn create_container(
                 error!("Failed to update container state in daemon state: {}", e);
             }
 
-            // Create container tracker for backward compatibility
+            // Create container tracker
             let tracker = ContainerTracker {
                 custom_uuid: custom_uuid.clone(),
                 container_id: container_id.clone(),
@@ -124,76 +166,101 @@ pub async fn create_container(
                 update_content: req.update_content.clone(),
             };
             
-            // Save container tracking data
             if let Err(e) = state.container_tracker.save_container(&tracker).await {
                 error!("Failed to save container tracking data: {}", e);
             }
 
-            // Start the container first
+            // Start the container
             if let Err(e) = manager.start(&container_id).await {
-                error!("Failed to start container for installation: {}", e);
+                error!("Failed to start container: {}", e);
                 if let Err(state_err) = state.state_manager.lock().await.update_container_state(&custom_uuid, "failed").await {
                     error!("Failed to update container state to failed: {}", state_err);
                 }
                 return Ok(Json(ApiResponse::error(format!("Failed to start container: {}", e))));
             }
 
-            // Update state to running
-            if let Err(e) = state.state_manager.lock().await.update_container_state(&custom_uuid, "running").await {
-                error!("Failed to update container state to running: {}", e);
-            }
-
-            // Run installation script if provided
-            if let Some(install_script) = &req.install_content {
-                info!("Running installation script for container: {}", container_id);
+            // If there's install content, monitor for completion and update entrypoint
+            if req.install_content.is_some() {
+                let bg_state = state.clone();
+                let bg_uuid = custom_uuid.clone();
+                let bg_container_id = container_id.clone();
+                let bg_entrypoint_path = entrypoint_path.clone();
+                let bg_startup_cmd = startup_cmd.clone();
                 
-                // Update state to installing and lock container
+                tokio::spawn(async move {
+                    // Lock container during install
+                    if let Err(e) = bg_state.state_manager.lock().await.update_container_state(&bg_uuid, "installing").await {
+                        error!("Failed to update state to installing: {}", e);
+                    }
+                    if let Err(e) = bg_state.state_manager.lock().await.lock_container(&bg_uuid, "Installing").await {
+                        error!("Failed to lock container: {}", e);
+                    }
+                    
+                    // Wait for container to exit (install script finished)
+                    let docker = bg_state.docker.client();
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        
+                        match docker.inspect_container(&bg_container_id, None).await {
+                            Ok(info) => {
+                                if let Some(state) = info.state {
+                                    if state.running != Some(true) {
+                                        // Container stopped - install finished
+                                        let exit_code = state.exit_code.unwrap_or(-1);
+                                        if exit_code == 0 {
+                                            // Success - update entrypoint to startup command
+                                            if let Err(e) = tokio::fs::write(&bg_entrypoint_path, &bg_startup_cmd).await {
+                                                error!("Failed to update entrypoint: {}", e);
+                                            }
+                                            
+                                            // Restart container with new entrypoint
+                                            let manager = ContainerManager::new(docker);
+                                            if let Err(e) = manager.start(&bg_container_id).await {
+                                                error!("Failed to restart container: {}", e);
+                                            }
+                                            
+                                            if let Err(e) = bg_state.state_manager.lock().await.update_container_state(&bg_uuid, "running").await {
+                                                error!("Failed to update state: {}", e);
+                                            }
+                                        } else {
+                                            // Install failed
+                                            if let Err(e) = bg_state.state_manager.lock().await.update_container_state(&bg_uuid, "install_failed").await {
+                                                error!("Failed to update state: {}", e);
+                                            }
+                                        }
+                                        
+                                        // Unlock
+                                        if let Err(e) = bg_state.state_manager.lock().await.unlock_container(&bg_uuid).await {
+                                            error!("Failed to unlock container: {}", e);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to inspect container: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                });
+                
                 if let Err(e) = state.state_manager.lock().await.update_container_state(&custom_uuid, "installing").await {
-                    error!("Failed to update container state to installing: {}", e);
-                }
-                if let Err(e) = state.state_manager.lock().await.lock_container(&custom_uuid, "Running installation script").await {
-                    error!("Failed to lock container during installation: {}", e);
-                }
-
-                // Run the installation script
-                match manager.run_installation(&container_id, install_script).await {
-                    Ok(install_logs) => {
-                        info!("Installation completed successfully for container: {}", container_id);
-                        
-                        // Update state to ready and unlock
-                        if let Err(e) = state.state_manager.lock().await.update_container_state(&custom_uuid, "ready").await {
-                            error!("Failed to update container state to ready: {}", e);
-                        }
-                        if let Err(e) = state.state_manager.lock().await.unlock_container(&custom_uuid).await {
-                            error!("Failed to unlock container after installation: {}", e);
-                        }
-                        
-                        info!("Installation logs: {}", install_logs);
-                    }
-                    Err(e) => {
-                        error!("Installation failed for container {}: {}", container_id, e);
-                        
-                        // Update state to failed and unlock
-                        if let Err(state_err) = state.state_manager.lock().await.update_container_state(&custom_uuid, "install_failed").await {
-                            error!("Failed to update container state to install_failed: {}", state_err);
-                        }
-                        if let Err(state_err) = state.state_manager.lock().await.unlock_container(&custom_uuid).await {
-                            error!("Failed to unlock container after failed installation: {}", state_err);
-                        }
-                        
-                        return Ok(Json(ApiResponse::error(format!("Installation failed: {}", e))));
-                    }
+                    error!("Failed to update container state: {}", e);
                 }
             } else {
-                // No installation script, mark as ready
-                if let Err(e) = state.state_manager.lock().await.update_container_state(&custom_uuid, "ready").await {
-                    error!("Failed to update container state to ready: {}", e);
+                if let Err(e) = state.state_manager.lock().await.update_container_state(&custom_uuid, "running").await {
+                    error!("Failed to update container state: {}", e);
                 }
             }
-            
+
+            let state_str = if req.install_content.is_some() { "installing" } else { "running" };
             let response = serde_json::json!({
-                "container_id": container_id,
-                "custom_uuid": custom_uuid,
+                "container_id": container_id.clone(),
+                "custom_uuid": custom_uuid.clone(),
+                "name": req.name.clone().unwrap_or_else(|| "unnamed".to_string()),
+                "image": req.image.clone(),
+                "state": state_str,
                 "allocated_ports": allocations.iter().map(|alloc| {
                     serde_json::json!({
                         "container_port": alloc.container_port,
@@ -204,6 +271,7 @@ pub async fn create_container(
                 }).collect::<Vec<_>>(),
                 "limits": tracker.limits
             });
+            
             Ok(Json(ApiResponse::success(response)))
         }
         Err(e) => {
@@ -777,12 +845,55 @@ pub async fn get_container_by_uuid(
     let state_manager = state.state_manager.lock().await;
     if let Some(container_state) = state_manager.get_container(&uuid) {
         if let Some(container_id) = &container_state.container_id {
+            let container_id_clone = container_id.clone();
+            let name = container_state.name.clone();
+            let image = container_state.image.clone();
+            let cached_state = container_state.state.clone();
+            drop(state_manager); // Release lock before Docker query
+            
+            // Preserve special states - don't override with Docker state
+            let special_states = ["install_failed", "installing", "suspended", "creating", "failed"];
+            let actual_state = if special_states.contains(&cached_state.as_str()) {
+                cached_state
+            } else {
+                // Query Docker for actual state
+                let docker = state.docker.client();
+                match docker.inspect_container(&container_id_clone, None).await {
+                    Ok(info) => {
+                        if let Some(docker_state) = info.state {
+                            // Check for OOM killed first
+                            if docker_state.oom_killed == Some(true) {
+                                "oom_killed".to_string()
+                            } else if docker_state.running == Some(true) {
+                                "running".to_string()
+                            } else if docker_state.paused == Some(true) {
+                                "paused".to_string()
+                            } else if docker_state.restarting == Some(true) {
+                                "restarting".to_string()
+                            } else if docker_state.dead == Some(true) {
+                                "dead".to_string()
+                            } else {
+                                // Check exit code for OOM (exit code 137 = killed by OOM)
+                                if docker_state.exit_code == Some(137) {
+                                    "oom_killed".to_string()
+                                } else {
+                                    "stopped".to_string()
+                                }
+                            }
+                        } else {
+                            "unknown".to_string()
+                        }
+                    }
+                    Err(_) => "offline".to_string(),
+                }
+            };
+            
             let response = ContainerLookupResponse {
                 uuid: uuid.clone(),
-                container_id: container_id.clone(),
-                name: container_state.name.clone(),
-                state: container_state.state.clone(),
-                image: container_state.image.clone(),
+                container_id: container_id_clone,
+                name,
+                state: actual_state,
+                image,
             };
             Ok(Json(ApiResponse::success(response)))
         } else {

@@ -4,11 +4,10 @@ import { useNavigate } from 'react-router-dom'
 import { useApi } from '@/api/client'
 import { useTenants } from '@/providers/TenantProvider'
 import { useTenantUpdates } from '@/providers/MQTTProvider'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
+import { Card, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Label } from '@/components/ui/Label'
-import { Select } from '@/components/ui/Select'
 import { Modal } from '@/components/ui/Modal'
 import Spinner from '@/components/ui/Spinner'
 import { PlusIcon, TrashIcon, CommandLineIcon } from '@heroicons/react/24/outline'
@@ -26,6 +25,9 @@ export function ServersPage() {
     const liveUpdates = useTenantUpdates(selectedTenantId)
     
     const [servers, setServers] = useState<any[]>([])
+    const [nodes, setNodes] = useState<any[]>([])
+    const [software, setSoftware] = useState<any[]>([])
+    const [selectedSoftware, setSelectedSoftware] = useState<any>(null)
     const [resources, setResources] = useState<any>(null)
     const [error, setError] = useState<string | null>(null)
     const [loading, setLoading] = useState(false)
@@ -35,14 +37,26 @@ export function ServersPage() {
     const [serverToDelete, setServerToDelete] = useState<any>(null)
     const [deleting, setDeleting] = useState(false)
     
-    // Form state - simplified for daemon
+    // Form state - new structure
     const [formData, setFormData] = useState({
         name: '',
-        dockerImage: 'nginx:alpine',
-        memoryMb: '512',
-        diskMb: '1024',
-        cpuPercent: '100'
+        description: '',
+        serverSoftwareId: '',
+        nodeId: '',
+        dockerImage: '',
+        env: {} as Record<string, string>
     })
+    
+    // RU estimate state
+    const [ruEstimate, setRuEstimate] = useState<{
+        ruPerHour: number
+        ruPerDay: number
+        ruPerMonth: number
+        pricePerHour: number
+        pricePerDay: number
+        pricePerMonth: number
+    } | null>(null)
+    const [loadingEstimate, setLoadingEstimate] = useState(false)
 
     const loadData = useCallback(async () => {
         if (!selectedTenantId) return
@@ -58,40 +72,117 @@ export function ServersPage() {
             setLoading(false)
         }
     }, [api, selectedTenantId])
+    
+    // Fetch RU estimate when node changes
+    const fetchRuEstimate = useCallback(async (nodeId: string) => {
+        if (!nodeId) {
+            setRuEstimate(null)
+            return
+        }
+        
+        setLoadingEstimate(true)
+        try {
+            const estimate = await api.wallet.getRUEstimate(nodeId)
+            console.log('RU estimate received:', estimate)
+            setRuEstimate(estimate)
+        } catch (e: any) {
+            console.error('Failed to fetch RU estimate:', e)
+            // Set a fallback estimate on error
+            setRuEstimate({
+                ruPerHour: 0.5,
+                ruPerDay: 12.0,
+                ruPerMonth: 360.0,
+                pricePerHour: 0.0005,
+                pricePerDay: 0.012,
+                pricePerMonth: 0.36
+            })
+        } finally {
+            setLoadingEstimate(false)
+        }
+    }, [api])
 
     const openCreateModal = async () => {
         if (!selectedTenantId) return
         
         try {
-            const resourcesRes = await api.tenants.resources(selectedTenantId)
+            // Load nodes and software
+            const [nodesRes, softwareRes, resourcesRes] = await Promise.all([
+                api.admin.nodes(),
+                api.admin.software(),
+                api.tenants.resources(selectedTenantId)
+            ])
+            
+            setNodes(nodesRes.items || [])
+            setSoftware(softwareRes.items || [])
             setResources(resourcesRes)
             
-            // Auto-fill with available resources
+            // Reset form
             setFormData({
                 name: '',
-                dockerImage: 'nginx:alpine',
-                memoryMb: Math.min(resourcesRes.remaining?.memoryMb || 512, 512).toString(),
-                diskMb: Math.min(resourcesRes.remaining?.diskMb || 1024, 1024).toString(),
-                cpuPercent: Math.min(resourcesRes.remaining?.cpuPercent || 100, 100).toString()
+                description: '',
+                serverSoftwareId: softwareRes.items?.[0]?.id || '',
+                nodeId: nodesRes.items?.[0]?.id || '',
+                dockerImage: '',
+                env: {}
             })
+            setRuEstimate(null)
+            
+            // Fetch RU estimate for initial node
+            if (nodesRes.items?.[0]?.id) {
+                fetchRuEstimate(nodesRes.items[0].id)
+            }
+            
+            // Set initial software selection
+            if (softwareRes.items?.[0]) {
+                setSelectedSoftware(softwareRes.items[0])
+                // Set default docker image
+                const firstImage = Object.values(softwareRes.items[0].docker_images || {})[0]
+                setFormData(prev => ({ ...prev, dockerImage: firstImage as string || '' }))
+                
+                // Set default env vars from software variables
+                const defaultEnv: Record<string, string> = {}
+                softwareRes.items[0].variables?.forEach((v: any) => {
+                    defaultEnv[v.env_variable] = v.default_value
+                })
+                setFormData(prev => ({ ...prev, env: defaultEnv }))
+            }
             
             setShowCreateModal(true)
         } catch (e: any) {
-            console.error('Failed to load resources:', e)
-            setFormData({
-                name: '',
-                dockerImage: 'nginx:alpine',
-                memoryMb: '512',
-                diskMb: '1024',
-                cpuPercent: '100'
-            })
-            setShowCreateModal(true)
+            console.error('Failed to load creation data:', e)
+            notify({ type: 'error', description: 'Failed to load nodes and software' })
         }
+    }
+    
+    const handleSoftwareChange = (softwareId: string) => {
+        const sw = software.find(s => s.id === softwareId)
+        setSelectedSoftware(sw)
+        setFormData(prev => ({ ...prev, serverSoftwareId: softwareId }))
+        
+        if (sw) {
+            // Set first docker image as default
+            const firstImage = Object.values(sw.docker_images || {})[0]
+            setFormData(prev => ({ ...prev, dockerImage: firstImage as string || '' }))
+            
+            // Set default env vars
+            const defaultEnv: Record<string, string> = {}
+            sw.variables?.forEach((v: any) => {
+                defaultEnv[v.env_variable] = v.default_value
+            })
+            setFormData(prev => ({ ...prev, env: defaultEnv }))
+        }
+    }
+    
+    const handleNodeChange = (nodeId: string) => {
+        setFormData(prev => ({ ...prev, nodeId }))
+        fetchRuEstimate(nodeId)
     }
 
     useEffect(() => {
         loadData()
     }, [loadData])
+
+    // Auto-refresh when there are servers being created (removed - now synchronous)
 
     // Handle live updates
     useEffect(() => {
@@ -133,43 +224,32 @@ export function ServersPage() {
         setCreating(true)
         
         try {
-            const response = await fetch(`/api/tenants/${selectedTenantId}/servers`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({
-                    name: formData.name,
-                    dockerImage: formData.dockerImage,
-                    memoryMb: Number(formData.memoryMb),
-                    diskMb: Number(formData.diskMb),
-                    cpuPercent: Number(formData.cpuPercent),
-                    env: {}
-                })
+            const result = await api.servers.create(selectedTenantId, {
+                name: formData.name,
+                description: formData.description || undefined,
+                serverSoftwareId: formData.serverSoftwareId,
+                nodeId: formData.nodeId,
+                env: formData.env
             })
             
-            if (!response.ok) {
-                const errorData = await response.json().catch(() => ({ error: 'Failed to create server' }))
-                throw new Error(errorData.error || 'Failed to create server')
-            }
-            
-            const result = await response.json()
-            console.log('Server creation started:', result)
+            console.log('Server created:', result)
             
             notify({ 
                 type: 'success', 
-                description: `Server "${result.name}" is being created. It will appear when ready.` 
+                title: 'Server Created',
+                description: `Server "${result.name}" created successfully.` 
             })
             
             setShowCreateModal(false)
-            setFormData({ name: '', dockerImage: 'nginx:alpine', memoryMb: '512', diskMb: '1024', cpuPercent: '100' })
+            setFormData({ name: '', description: '', serverSoftwareId: '', nodeId: '', dockerImage: '', env: {} })
+            setSelectedSoftware(null)
+            setRuEstimate(null)
             
-            // Refresh server list to show "creating" state
+            // Refresh server list
             loadData()
             
         } catch (e: any) {
-            notify({ type: 'error', description: e?.message || 'Failed to create server' })
+            notify({ type: 'error', title: 'Creation Failed', description: e?.message || 'Failed to create server' })
         } finally {
             setCreating(false)
         }
@@ -263,20 +343,25 @@ export function ServersPage() {
                                         <div className="text-sm text-neutral-900 dark:text-neutral-100">
                                             {server.dockerImage}
                                         </div>
+                                        {server.description && (
+                                            <div className="text-xs text-neutral-500 dark:text-neutral-400">
+                                                {server.description}
+                                            </div>
+                                        )}
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap">
                                         <div className="text-sm text-neutral-900 dark:text-neutral-100">
-                                            {server.memoryMb}MB RAM
+                                            {server.limits?.memory || 'N/A'}
                                         </div>
                                         <div className="text-xs text-neutral-500 dark:text-neutral-400">
-                                            {server.diskMb}MB Disk • {server.cpuPercent}% CPU
+                                            {server.limits?.disk || 'N/A'} • {server.limits?.cpu || 'N/A'}
                                         </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap">
                                         <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                                            server.state === 'running' 
+                                            server.state === 'running' || server.state === 'ready'
                                                 ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
-                                                : server.state === 'stopped'
+                                                : server.state === 'stopped' || server.state === 'exited'
                                                 ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
                                                 : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400'
                                         }`}>
@@ -335,67 +420,149 @@ export function ServersPage() {
                             type="text"
                             value={formData.name}
                             onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                            placeholder="my-server"
+                            placeholder="my-nodejs-server"
                             required
                         />
                     </div>
 
                     <div>
-                        <Label htmlFor="dockerImage">Docker Image</Label>
+                        <Label htmlFor="description">Description (Optional)</Label>
                         <Input
-                            id="dockerImage"
+                            id="description"
                             type="text"
-                            value={formData.dockerImage}
-                            onChange={(e) => setFormData({ ...formData, dockerImage: e.target.value })}
-                            placeholder="nginx:alpine"
-                            required
+                            value={formData.description}
+                            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                            placeholder="My application server"
                         />
+                    </div>
+
+                    <div>
+                        <Label htmlFor="serverSoftware">Server Software</Label>
+                        <select
+                            id="serverSoftware"
+                            value={formData.serverSoftwareId}
+                            onChange={(e) => handleSoftwareChange(e.target.value)}
+                            className="w-full px-3 py-2 text-sm border border-neutral-200 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-800"
+                            required
+                        >
+                            <option value="">Select software...</option>
+                            {software.map((sw) => (
+                                <option key={sw.id} value={sw.id}>
+                                    {sw.name}
+                                </option>
+                            ))}
+                        </select>
                         <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                            Examples: nginx:alpine, node:18-alpine, python:3.11-slim
+                            Choose the software stack for your server
                         </p>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-4">
+                    {selectedSoftware && Object.keys(selectedSoftware.docker_images || {}).length > 0 && (
                         <div>
-                            <Label htmlFor="memoryMb">Memory (MB)</Label>
-                            <Input
-                                id="memoryMb"
-                                type="number"
-                                min="128"
-                                value={formData.memoryMb}
-                                onChange={(e) => setFormData({ ...formData, memoryMb: e.target.value })}
-                                placeholder="512"
+                            <Label htmlFor="dockerImage">Docker Image</Label>
+                            <select
+                                id="dockerImage"
+                                value={formData.dockerImage}
+                                onChange={(e) => setFormData({ ...formData, dockerImage: e.target.value })}
+                                className="w-full px-3 py-2 text-sm border border-neutral-200 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-800"
                                 required
-                            />
+                            >
+                                {Object.entries(selectedSoftware.docker_images).map(([key, value]) => (
+                                    <option key={key} value={value as string}>
+                                        {key}: {value as string}
+                                    </option>
+                                ))}
+                            </select>
+                            <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                                Select which Docker image version to use
+                            </p>
                         </div>
+                    )}
 
-                        <div>
-                            <Label htmlFor="diskMb">Disk (MB)</Label>
-                            <Input
-                                id="diskMb"
-                                type="number"
-                                min="256"
-                                value={formData.diskMb}
-                                onChange={(e) => setFormData({ ...formData, diskMb: e.target.value })}
-                                placeholder="1024"
-                                required
-                            />
+                    {selectedSoftware && selectedSoftware.variables && selectedSoftware.variables.length > 0 && (
+                        <div className="space-y-3">
+                            <Label>Environment Variables</Label>
+                            {selectedSoftware.variables.filter((v: any) => v.user_editable).map((variable: any) => (
+                                <div key={variable.env_variable}>
+                                    <Label htmlFor={variable.env_variable} className="text-xs">
+                                        {variable.name}
+                                        {variable.description && (
+                                            <span className="text-neutral-500 dark:text-neutral-400 font-normal ml-1">
+                                                - {variable.description}
+                                            </span>
+                                        )}
+                                    </Label>
+                                    <Input
+                                        id={variable.env_variable}
+                                        type={variable.field_type === 'number' ? 'number' : 'text'}
+                                        value={formData.env[variable.env_variable] || variable.default_value}
+                                        onChange={(e) => setFormData({
+                                            ...formData,
+                                            env: { ...formData.env, [variable.env_variable]: e.target.value }
+                                        })}
+                                        placeholder={variable.default_value}
+                                        className="text-sm"
+                                    />
+                                </div>
+                            ))}
                         </div>
+                    )}
 
-                        <div>
-                            <Label htmlFor="cpuPercent">CPU (%)</Label>
-                            <Input
-                                id="cpuPercent"
-                                type="number"
-                                min="10"
-                                max="400"
-                                value={formData.cpuPercent}
-                                onChange={(e) => setFormData({ ...formData, cpuPercent: e.target.value })}
-                                placeholder="100"
-                                required
-                            />
-                        </div>
+                    <div>
+                        <Label htmlFor="node">Node</Label>
+                        <select
+                            id="node"
+                            value={formData.nodeId}
+                            onChange={(e) => handleNodeChange(e.target.value)}
+                            className="w-full px-3 py-2 text-sm border border-neutral-200 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-800"
+                            required
+                        >
+                            <option value="">Select node...</option>
+                            {nodes.map((node) => (
+                                <option key={node.id} value={node.id}>
+                                    {node.name} ({node.network.uri})
+                                </option>
+                            ))}
+                        </select>
+                        <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                            Choose which node will host this server
+                        </p>
                     </div>
+
+                    {/* RU Cost Estimate */}
+                    {formData.nodeId && (
+                        <div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-md p-3">
+                            <p className="text-xs font-medium text-purple-900 dark:text-purple-100 mb-2">
+                                Estimated Resource Usage
+                            </p>
+                            {loadingEstimate ? (
+                                <p className="text-xs text-purple-700 dark:text-purple-300">Calculating...</p>
+                            ) : ruEstimate ? (
+                                <div className="space-y-1">
+                                    <div className="flex justify-between text-xs">
+                                        <span className="text-purple-700 dark:text-purple-300">Per Hour:</span>
+                                        <span className="font-medium text-purple-900 dark:text-purple-100">
+                                            {ruEstimate.ruPerHour.toFixed(2)} RU (${ruEstimate.pricePerHour.toFixed(4)})
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between text-xs">
+                                        <span className="text-purple-700 dark:text-purple-300">Per Day:</span>
+                                        <span className="font-medium text-purple-900 dark:text-purple-100">
+                                            {ruEstimate.ruPerDay.toFixed(2)} RU
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between text-xs">
+                                        <span className="text-purple-700 dark:text-purple-300">Per Month:</span>
+                                        <span className="font-medium text-purple-900 dark:text-purple-100">
+                                            {ruEstimate.ruPerMonth.toFixed(2)} RU (${ruEstimate.pricePerMonth.toFixed(2)})
+                                        </span>
+                                    </div>
+                                </div>
+                            ) : (
+                                <p className="text-xs text-purple-700 dark:text-purple-300">Unable to calculate estimate</p>
+                            )}
+                        </div>
+                    )}
 
                     {resources && (
                         <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-3">

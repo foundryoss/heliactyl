@@ -1,4 +1,5 @@
 use axum::{
+    extract::State,
     response::Json,
     routing::{delete, get, post, put},
     Router,
@@ -370,12 +371,18 @@ async fn start_daemon() -> anyhow::Result<()> {
     let network_config = config.network.as_ref()
         .ok_or_else(|| anyhow::anyhow!("Network configuration not loaded"))?;
     
-    // Use network config for port range and create network manager with config
-    let network = NetworkManager::with_config(Arc::new(network_config.clone()));
+    // Use network config for port range and create network manager with storage
+    let mut network = NetworkManager::with_config(Arc::new(network_config.clone()))
+        .with_storage(&config.storage.base_path);
 
     // Initialize container tracker with configurable path
     let container_tracker = ContainerTrackingManager::new(&config.storage.containers_path);
     container_tracker.init().await?;
+
+    // Restore network state from container tracker data
+    if let Ok(containers) = container_tracker.list_containers().await {
+        network.restore_from_containers(&containers);
+    }
 
     // Initialize state manager
     let mut state_manager = StateManager::new(&config.storage.base_path);
@@ -419,7 +426,6 @@ async fn start_daemon() -> anyhow::Result<()> {
 
     // Initialize WebSocket token manager
     let websocket_tokens = Arc::new(crate::websocket::TokenManager::new());
-    let websocket_broadcasters = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     
     // Start token cleanup task
     let token_manager_clone = websocket_tokens.clone();
@@ -436,7 +442,6 @@ async fn start_daemon() -> anyhow::Result<()> {
         state_manager: resource_monitor.1,
         resource_monitor: resource_monitor.0,
         websocket_tokens,
-        websocket_broadcasters,
     };
 
     let app = Router::new()
@@ -485,6 +490,8 @@ async fn start_daemon() -> anyhow::Result<()> {
         .route("/monitoring/containers/:id/history", get(handlers::monitoring::get_container_metrics_history))
         .route("/monitoring/ru/summary", get(handlers::monitoring::get_ru_summary))
         .route("/monitoring/ru/containers/:id", get(handlers::monitoring::get_container_ru_breakdown))
+        .route("/monitoring/ru/config", get(handlers::monitoring::get_ru_config))
+        .route("/monitoring/ru/estimate", post(handlers::monitoring::calculate_ru_estimate))
         // Snapshot routes
         .route("/snapshots", get(handlers::snapshot::list_snapshots))
         .route("/snapshots/:id", get(handlers::snapshot::get_snapshot_info))
@@ -507,10 +514,10 @@ async fn start_daemon() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn health_check() -> Json<serde_json::Value> {
+async fn health_check(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "healthy",
         "service": "lightd",
-        "version": "0.1.0"
+        "version": state.config.version
     }))
 }

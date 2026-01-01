@@ -10,10 +10,13 @@ pub struct DockerClient {
 impl DockerClient {
     /// Create a new Docker client connection
     pub async fn new(socket_path: &str) -> anyhow::Result<Self> {
+        // Use a longer timeout (600 seconds = 10 minutes) for image pulls and long operations
+        let timeout_seconds = 600;
+        
         let client = if socket_path.starts_with("unix://") {
-            Docker::connect_with_socket(socket_path, 120, bollard::API_DEFAULT_VERSION)?
+            Docker::connect_with_socket(socket_path, timeout_seconds, bollard::API_DEFAULT_VERSION)?
         } else {
-            Docker::connect_with_unix(socket_path, 120, bollard::API_DEFAULT_VERSION)?
+            Docker::connect_with_unix(socket_path, timeout_seconds, bollard::API_DEFAULT_VERSION)?
         };
 
         // Test connection

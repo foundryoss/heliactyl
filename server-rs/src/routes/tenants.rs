@@ -12,7 +12,8 @@ use crate::{heli, middleware::auth::AuthUser};
 use crate::auth::oauth::AppState;
 use crate::models::tenant::{Tenant, TenantMember, CreateTenantRequest, TenantResponse, ResourcesResponse};
 use crate::models::server::Server;
-use crate::utils::resources::{get_package_resources, sum_used_resources, remaining_resources};
+use crate::utils::resources::{get_package_resources, sum_used_resources, remaining_resources, parse_memory_to_mb, parse_disk_to_mb, parse_cpu_to_percent};
+use futures_util::StreamExt;
 
 #[derive(Debug, Deserialize)]
 pub struct AddMemberRequest {
@@ -51,7 +52,6 @@ pub async fn list_tenants(
         })?;
     
     let mut tenants = Vec::new();
-    use futures_util::StreamExt;
     while let Some(result) = cursor.next().await {
         if let Ok(tenant) = result {
             // Find user's role in this tenant
@@ -214,36 +214,21 @@ pub async fn get_tenant_resources(
         return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "Forbidden" }))));
     }
     
-    // Get our server container IDs
+    // Get resource usage from MongoDB servers
+    let servers_collection = db.collection::<crate::models::server::Server>("servers");
     let mut cursor = servers_collection
         .find(doc! { "tenant_id": &tenant_id })
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "Database error" }))))?;
     
-    let mut owned_containers = std::collections::HashSet::new();
-    use futures_util::StreamExt;
+    // Calculate used resources from our servers
+    let mut servers_data = Vec::new();
     while let Some(result) = cursor.next().await {
         if let Ok(server) = result {
-            owned_containers.insert(server.container_id);
-        }
-    }
-    
-    // Get resource usage from daemon
-    let daemon_client = crate::daemon::DaemonClient::new(
-        "http://localhost:8083".to_string(),
-        "pkg-lat-daemon-token-2024".to_string(),
-    );
-    
-    let all_containers = daemon_client.list_containers().await.unwrap_or_default();
-    
-    // Calculate used resources from our containers
-    let mut servers_data = Vec::new();
-    for container in all_containers {
-        if owned_containers.contains(&container.id) {
-            // Convert daemon limits back to our format
-            let memory_mb = (container.limits.memory_limit / (1024 * 1024)) as i64;
-            let disk_mb = (container.limits.disk_limit / (1024 * 1024)) as i64;
-            let cpu_percent = (container.limits.cpu_limit * 100.0) as i64;
+            // Parse limits from server record
+            let memory_mb = parse_memory_to_mb(&server.limits.memory);
+            let disk_mb = parse_disk_to_mb(&server.limits.disk);
+            let cpu_percent = parse_cpu_to_percent(&server.limits.cpu);
             servers_data.push((memory_mb, disk_mb, cpu_percent));
         }
     }

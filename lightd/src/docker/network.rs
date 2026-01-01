@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{TcpListener, SocketAddr};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 use serde::{Serialize, Deserialize};
 use crate::network_config::NetworkConfig;
 
@@ -13,12 +13,19 @@ pub struct PortAllocation {
     pub protocol: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NetworkState {
+    pub allocated_ports: HashMap<u16, String>,
+    pub container_ports: HashMap<String, Vec<PortAllocation>>,
+}
+
 /// Network and port management for containers
 pub struct NetworkManager {
     allocated_ports: HashMap<u16, String>, // port -> container_id
     container_ports: HashMap<String, Vec<PortAllocation>>, // container_id -> port allocations
     port_range: (u16, u16), // (start, end) port range for allocation
     network_config: Arc<NetworkConfig>,
+    storage_path: Option<String>,
 }
 
 impl NetworkManager {
@@ -28,6 +35,7 @@ impl NetworkManager {
             container_ports: HashMap::new(),
             port_range: (start_port, end_port),
             network_config: Arc::new(NetworkConfig::default()),
+            storage_path: None,
         }
     }
 
@@ -37,7 +45,58 @@ impl NetworkManager {
             container_ports: HashMap::new(),
             port_range: (network_config.ports.range_start, network_config.ports.range_end),
             network_config,
+            storage_path: None,
         }
+    }
+
+    pub fn with_storage(mut self, storage_path: &str) -> Self {
+        self.storage_path = Some(format!("{}/network_state.json", storage_path));
+        self
+    }
+
+    /// Load network state from disk
+    pub async fn load_state(&mut self) -> anyhow::Result<()> {
+        if let Some(path) = &self.storage_path {
+            if tokio::fs::metadata(path).await.is_ok() {
+                let content = tokio::fs::read_to_string(path).await?;
+                let state: NetworkState = serde_json::from_str(&content)?;
+                self.allocated_ports = state.allocated_ports;
+                self.container_ports = state.container_ports;
+                info!("Loaded network state: {} allocated ports", self.allocated_ports.len());
+            }
+        }
+        Ok(())
+    }
+
+    /// Save network state to disk
+    pub async fn save_state(&self) -> anyhow::Result<()> {
+        if let Some(path) = &self.storage_path {
+            let state = NetworkState {
+                allocated_ports: self.allocated_ports.clone(),
+                container_ports: self.container_ports.clone(),
+            };
+            let content = serde_json::to_string_pretty(&state)?;
+            tokio::fs::write(path, content).await?;
+        }
+        Ok(())
+    }
+
+    /// Restore port allocations from container tracker data
+    pub fn restore_from_containers(&mut self, containers: &[crate::models::ContainerTracker]) {
+        for container in containers {
+            for alloc in &container.allocated_ports {
+                if let Ok(port) = alloc.host_port.parse::<u16>() {
+                    self.allocated_ports.insert(port, container.custom_uuid.clone());
+                }
+            }
+            if !container.allocated_ports.is_empty() {
+                self.container_ports.insert(
+                    container.custom_uuid.clone(),
+                    container.allocated_ports.clone(),
+                );
+            }
+        }
+        info!("Restored {} port allocations from container data", self.allocated_ports.len());
     }
 
     /// Find an available port from the available_ports array first, then fallback to range

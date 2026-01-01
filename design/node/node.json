@@ -1,0 +1,44 @@
+{
+    "name": "India-MUM",
+    "limits": {
+        "cpu": "1",
+        "memory": "1024MB",
+        "disk": "100GB"
+    },
+    "network":{
+        "uri": "localhost:8070",
+        "scheme": "http",
+        "authType": "BASIC",
+        "ip" : "0.0.0.0",
+        "fqdn" : ""
+   },
+   "node_config": {
+        "_note" : "Don't mess around with this if you don't know what your doing mate ;)",
+        "version": "0.1.0",
+        "server": {
+            "host": "0.0.0.0",
+            "port": 8070
+        },
+        "docker": {
+            "socket_path": "/var/run/docker.sock"
+        },
+        "storage": {
+            "base_path": "./storage",
+            "containers_path": "./storage/containers",
+            "volumes_path": "./storage/volumes"
+        },
+        "monitoring": {
+            "enabled": true,
+            "interval_ms": 1000,
+            "ru_config": {
+            "cpu_weight": 1.0,
+            "memory_weight": 0.5,
+            "io_weight": 2.0,
+            "network_weight": 1.5,
+            "storage_weight": 0.8,
+            "base_ru": 0.1
+            }
+        }
+    }
+
+}

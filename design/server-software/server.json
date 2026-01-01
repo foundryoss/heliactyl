@@ -1,0 +1,40 @@
+{
+  "_note": "Example server configuration that references server software from database",
+  "name": "My Node.js Server",
+  "description": "A Node.js application server",
+  "server_software_id": "507f1f77bcf86cd799439011",
+  "node_id": "507f1f77bcf86cd799439012",
+  "volumes": [
+    {
+      "name": "app-data",
+      "mount_path": "/home/container/data"
+    }
+  ],
+  "network": {
+    "ports": {
+      "3000": {
+        "protocol": "tcp",
+        "primary": true
+      },
+      "8080": {
+        "protocol": "tcp",
+        "primary": false
+      }
+    }
+  },
+  "limits": {
+    "cpu": "1.0",
+    "memory": "1024MB",
+    "disk": "5GB",
+    "pids": 256,
+    "threads": 512
+  },
+  "env": {
+    "NODE_ENV": "production",
+    "FILE_TO_RUN": "index.js"
+  },
+  "startup": {
+    "skip_install": false,
+    "skip_update": false
+  }
+}

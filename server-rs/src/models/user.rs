@@ -20,6 +20,18 @@ pub struct User {
     pub updated_at: DateTime,
     #[serde(default)]
     pub data: Vec<Value>,
+    #[serde(default)]
+    pub wallet: UserWallet,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct UserWallet {
+    #[serde(default)]
+    pub ru_balance: f64,  // Resource Units balance
+    #[serde(default)]
+    pub currency_balance: f64,  // USD balance for purchasing RU
+    #[serde(default)]
+    pub currency: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +74,11 @@ impl User {
             created_at: now,
             updated_at: now,
             data: Vec::new(),
+            wallet: UserWallet {
+                ru_balance: 0.0,
+                currency_balance: 0.0,
+                currency: "USD".to_string(),
+            },
         }
     }
 }

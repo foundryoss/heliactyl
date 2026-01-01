@@ -11,7 +11,6 @@ use crate::middleware::auth::AuthUser;
 use crate::auth::oauth::AppState;
 use crate::models::tenant::Tenant;
 use crate::models::billing::{TenantBalance, BillingTransaction};
-use crate::daemon::DaemonClient;
 
 /// Get billing information for a tenant
 pub async fn get_tenant_billing(
@@ -36,18 +35,6 @@ pub async fn get_tenant_billing(
         return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "Forbidden" }))));
     }
     
-    // Get billing from daemon
-    let daemon_client = DaemonClient::new(
-        "http://localhost:8083".to_string(),
-        "pkg-lat-daemon-token-2024".to_string(),
-    );
-    
-    let billing = daemon_client.get_tenant_billing(&tenant_id).await
-        .map_err(|e| {
-            tracing::error!("Failed to get tenant billing: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("Failed to get billing: {}", e) })))
-        })?;
-    
     // Get tenant balance from database
     let balance_collection = db.collection::<TenantBalance>("tenant_balances");
     let balance = balance_collection
@@ -55,9 +42,24 @@ pub async fn get_tenant_billing(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "Database error" }))))?;
     
+    // TODO: Calculate usage from container metrics when monitoring is implemented
+    let usage = json!({
+        "cpu": 0.0,
+        "memory": 0,
+        "disk": 0,
+        "network": 0,
+        "estimated_cost": 0.0
+    });
+    
     Ok(Json(json!({
         "tenantId": tenant_id,
-        "billing": billing,
+        "billing": {
+            "usage": usage,
+            "period": {
+                "start": chrono::Utc::now().format("%Y-%m-01T00:00:00Z").to_string(),
+                "end": chrono::Utc::now().to_rfc3339(),
+            }
+        },
         "balance": balance.map(|b| json!({
             "balance": b.balance,
             "currency": b.currency,
@@ -71,18 +73,20 @@ pub async fn get_billing_config(
     Extension(_auth_user): Extension<AuthUser>,
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let daemon_client = DaemonClient::new(
-        "http://localhost:8083".to_string(),
-        "pkg-lat-daemon-token-2024".to_string(),
-    );
-    
-    let config = daemon_client.get_billing_config().await
-        .map_err(|e| {
-            tracing::error!("Failed to get billing config: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("Failed to get config: {}", e) })))
-        })?;
-    
-    Ok(Json(json!(config)))
+    // Return default billing configuration
+    // TODO: Store this in database for admin configuration
+    Ok(Json(json!({
+        "enabled": true,
+        "currency": "USD",
+        "rates": {
+            "cpu_per_hour": 0.01,
+            "memory_gb_per_hour": 0.005,
+            "disk_gb_per_month": 0.10,
+            "network_gb": 0.01
+        },
+        "billing_cycle": "monthly",
+        "payment_methods": ["credit_card", "paypal"]
+    })))
 }
 
 /// Get billing transactions for a tenant

@@ -220,8 +220,8 @@ fi
 # 6. Cleanup
 echo ""
 echo "6. Cleanup:"
-stop_response=$(make_request "POST" "/containers/uuid/$CONTAINER_UUID/stop" '{}' "Stopping container...")
-remove_response=$(make_request "DELETE" "/containers/$CONTAINER_ID" "" "Removing container...")
+#stop_response=$(make_request "POST" "/containers/uuid/$CONTAINER_UUID/stop" '{}' "Stopping container...")
+#remove_response=$(make_request "DELETE" "/containers/$CONTAINER_ID" "" "Removing container...")
 
 # Clean up test file
 rm -f /tmp/ws_test.js

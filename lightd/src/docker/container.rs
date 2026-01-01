@@ -96,6 +96,36 @@ fn generate_limit_env_vars(limits: &Option<ResourceLimits>) -> Vec<String> {
     env_vars
 }
 
+/// Generate environment variables for allocated ports
+fn generate_port_env_vars(allocated_ports: &HashMap<String, String>) -> Vec<String> {
+    let mut env_vars = Vec::new();
+    
+    if allocated_ports.is_empty() {
+        return env_vars;
+    }
+    
+    // Add individual port mappings: LIGHTD_PORT_<container_port>=<host_port>
+    for (container_port, host_port) in allocated_ports {
+        env_vars.push(format!("LIGHTD_PORT_{}={}", container_port, host_port));
+    }
+    
+    // Add primary port (first allocated port) for convenience
+    if let Some((container_port, host_port)) = allocated_ports.iter().next() {
+        env_vars.push(format!("LIGHTD_PRIMARY_PORT={}", host_port));
+        env_vars.push(format!("LIGHTD_PRIMARY_CONTAINER_PORT={}", container_port));
+    }
+    
+    // Add all ports as JSON for easy parsing
+    if let Ok(ports_json) = serde_json::to_string(allocated_ports) {
+        env_vars.push(format!("LIGHTD_PORTS_JSON={}", ports_json));
+    }
+    
+    // Add port count
+    env_vars.push(format!("LIGHTD_PORT_COUNT={}", allocated_ports.len()));
+    
+    env_vars
+}
+
 /// Container management operations
 pub struct ContainerManager<'a> {
     client: &'a Docker,
@@ -106,10 +136,31 @@ impl<'a> ContainerManager<'a> {
         Self { client }
     }
 
-    /// Create a new container with automatic port allocation
-    pub async fn create_with_networking(&self, req: CreateContainerRequest, network_manager: &Arc<Mutex<NetworkManager>>, container_uuid: &str) -> anyhow::Result<(String, Vec<super::network::PortAllocation>)> {
+    /// Create a new container with automatic port allocation and volume binding
+    pub async fn create_with_networking(
+        &self, 
+        req: CreateContainerRequest, 
+        network_manager: &Arc<Mutex<NetworkManager>>, 
+        container_uuid: &str,
+        volumes_base_path: &str,
+    ) -> anyhow::Result<(String, Vec<super::network::PortAllocation>)> {
         // Pull image if it doesn't exist locally
         self.pull_image_if_needed(&req.image).await?;
+
+        // Create container's dedicated volume directory (convert to absolute path for Docker)
+        let relative_path = format!("{}/{}", volumes_base_path, container_uuid);
+        let container_volume_path = std::fs::canonicalize(&relative_path)
+            .or_else(|_| {
+                // If path doesn't exist yet, create it first then canonicalize
+                std::fs::create_dir_all(&relative_path)?;
+                std::fs::canonicalize(&relative_path)
+            })?
+            .to_string_lossy()
+            .to_string();
+        
+        // Ensure directory exists
+        tokio::fs::create_dir_all(&container_volume_path).await?;
+        info!("Created container volume directory: {}", container_volume_path);
 
         // Handle port allocation with HashMap format
         let allocated_ports = if let Some(ports) = &req.ports {
@@ -137,7 +188,24 @@ impl<'a> ContainerManager<'a> {
             );
         }
 
-        let mut binds = Vec::new();
+        // Create data directory for entrypoint (separate from user volume)
+        let data_path = format!("{}/{}_data", volumes_base_path, container_uuid);
+        let data_volume_path = std::fs::canonicalize(&data_path)
+            .or_else(|_| {
+                std::fs::create_dir_all(&data_path)?;
+                std::fs::canonicalize(&data_path)
+            })?
+            .to_string_lossy()
+            .to_string();
+        tokio::fs::create_dir_all(&data_volume_path).await?;
+
+        // Bind volumes: /home/container (user data) and /data (entrypoint, read-only)
+        let mut binds = vec![
+            format!("{}:/home/container", container_volume_path),
+            format!("{}:/data:ro", data_volume_path),
+        ];
+        
+        // Add any additional user-specified volumes
         if let Some(volumes) = &req.volumes {
             for volume in volumes {
                 let bind = if volume.read_only.unwrap_or(false) {
@@ -156,13 +224,15 @@ impl<'a> ContainerManager<'a> {
             } else {
                 Some(port_bindings)
             },
-            binds: if binds.is_empty() { None } else { Some(binds) },
+            binds: Some(binds), // Always has at least the container volume
             restart_policy: req.restart_policy.as_ref().map(|_policy| {
                 bollard::models::RestartPolicy {
                     name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
                     maximum_retry_count: None,
                 }
             }),
+            // Enable OOM killer - container will be killed if it exceeds memory limit
+            oom_kill_disable: Some(false),
             ..Default::default()
         };
 
@@ -219,6 +289,9 @@ impl<'a> ContainerManager<'a> {
                 // Add resource limit environment variables
                 all_env.extend(generate_limit_env_vars(&req.limits));
                 
+                // Add port allocation environment variables
+                all_env.extend(generate_port_env_vars(&allocated_ports));
+                
                 if all_env.is_empty() {
                     None
                 } else {
@@ -226,7 +299,12 @@ impl<'a> ContainerManager<'a> {
                 }
             },
             cmd: req.startup_command.clone().or(req.command.clone()),
-            working_dir: req.working_dir.clone().or(Some("/workspace".to_string())),
+            working_dir: Some("/home/container".to_string()),
+            tty: Some(true),
+            open_stdin: Some(true),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
             exposed_ports: if exposed_ports.is_empty() {
                 None
             } else {
@@ -741,6 +819,173 @@ impl<'a> ContainerManager<'a> {
         Ok(logs)
     }
 
+    /// Stream container logs continuously via a broadcast channel
+    pub async fn stream_logs(
+        &self,
+        id: &str,
+        tx: tokio::sync::broadcast::Sender<String>,
+        tail: Option<&str>,
+    ) -> anyhow::Result<()> {
+        use bollard::container::LogsOptions;
+        use futures_util::stream::StreamExt;
+        
+        // First check if container is running to decide follow mode
+        let is_running = match self.client.inspect_container(id, None).await {
+            Ok(info) => info.state.and_then(|s| s.running).unwrap_or(false),
+            Err(_) => false,
+        };
+        
+        // Use follow=true only for running containers
+        let options = LogsOptions::<String> {
+            follow: is_running,
+            stdout: true,
+            stderr: true,
+            tail: tail.unwrap_or("all").to_string(),
+            timestamps: false,
+            ..Default::default()
+        };
+
+        info!("Starting log stream for container: {} (follow={})", id, is_running);
+        let mut stream = self.client.logs(id, Some(options));
+        
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(log_output) => {
+                    let text = log_output.to_string();
+                    // Send each line separately
+                    for line in text.lines() {
+                        let line = line.trim().to_string();
+                        if !line.is_empty() {
+                            if tx.send(line).is_err() {
+                                info!("No receivers for log stream, stopping");
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Container might have stopped or been removed
+                    warn!("Log stream error for {}: {}", id, e);
+                    break;
+                }
+            }
+        }
+        
+        info!("Log stream ended for container: {}", id);
+        Ok(())
+    }
+
+    /// Attach to container and stream output (for interactive containers with TTY)
+    pub async fn attach_and_stream(
+        &self,
+        id: &str,
+        tx: tokio::sync::broadcast::Sender<String>,
+    ) -> anyhow::Result<()> {
+        use bollard::container::AttachContainerOptions;
+        use futures_util::stream::StreamExt;
+        
+        let options = AttachContainerOptions::<String> {
+            stdout: Some(true),
+            stderr: Some(true),
+            stream: Some(true),
+            logs: Some(true), // Include existing logs
+            ..Default::default()
+        };
+
+        info!("Attaching to container: {}", id);
+        let attach_result = self.client.attach_container(id, Some(options)).await?;
+        let mut output = attach_result.output;
+        
+        let mut buffer = Vec::with_capacity(1024);
+        let mut line_start = 0;
+        
+        while let Some(chunk) = output.next().await {
+            match chunk {
+                Ok(log_output) => {
+                    let bytes = log_output.into_bytes();
+                    buffer.extend_from_slice(&bytes);
+                    
+                    // Process complete lines
+                    let mut search_start = line_start;
+                    loop {
+                        if let Some(pos) = buffer[search_start..].iter().position(|&b| b == b'\n') {
+                            let newline_pos = search_start + pos;
+                            
+                            // Limit line length to 4096 chars
+                            if newline_pos - line_start <= 4096 {
+                                let line = String::from_utf8_lossy(&buffer[line_start..newline_pos])
+                                    .trim()
+                                    .to_string();
+                                
+                                if !line.is_empty() && tx.send(line).is_err() {
+                                    info!("No receivers for attach stream, stopping");
+                                    return Ok(());
+                                }
+                                
+                                line_start = newline_pos + 1;
+                                search_start = line_start;
+                            } else {
+                                // Line too long, send first 4096 chars
+                                let line = String::from_utf8_lossy(&buffer[line_start..(line_start + 4096)])
+                                    .trim()
+                                    .to_string();
+                                
+                                if !line.is_empty() && tx.send(line).is_err() {
+                                    info!("No receivers for attach stream, stopping");
+                                    return Ok(());
+                                }
+                                
+                                line_start += 4096;
+                                search_start = line_start;
+                            }
+                        } else {
+                            // No complete line yet, check if buffer is too large
+                            let current_line_length = buffer.len() - line_start;
+                            if current_line_length > 4096 {
+                                let line = String::from_utf8_lossy(&buffer[line_start..(line_start + 4096)])
+                                    .trim()
+                                    .to_string();
+                                
+                                if !line.is_empty() && tx.send(line).is_err() {
+                                    info!("No receivers for attach stream, stopping");
+                                    return Ok(());
+                                }
+                                
+                                line_start += 4096;
+                                search_start = line_start;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Trim buffer if it's getting large
+                    if line_start > 2048 && line_start > buffer.len() / 2 {
+                        buffer.drain(0..line_start);
+                        line_start = 0;
+                    }
+                }
+                Err(e) => {
+                    warn!("Attach stream error for {}: {}", id, e);
+                    break;
+                }
+            }
+        }
+        
+        // Send any remaining buffered data
+        if line_start < buffer.len() {
+            let line = String::from_utf8_lossy(&buffer[line_start..])
+                .trim()
+                .to_string();
+            if !line.is_empty() {
+                let _ = tx.send(line);
+            }
+        }
+        
+        info!("Attach stream ended for container: {}", id);
+        Ok(())
+    }
+
     /// Execute a command in a running container
     pub async fn exec_command(&self, id: &str, cmd: Vec<&str>) -> anyhow::Result<String> {
         use bollard::exec::{CreateExecOptions, StartExecResults};
@@ -919,9 +1164,9 @@ impl<'a> ContainerManager<'a> {
         
         info!("Running installation script in container: {}", id);
         
-        // Create workspace directory and script file in the container
+        // Create script file in the container - work in /home/container
         let script_content = format!(
-            "#!/bin/sh\nset -e\necho 'Starting installation...'\necho 'Container UUID: {}'\n\n# Create workspace directory\nmkdir -p /workspace\ncd /workspace\n\n{}\necho 'Installation completed successfully'",
+            "#!/bin/sh\nset -e\necho 'Starting installation...'\necho 'Container UUID: {}'\n\ncd /home/container\n\n{}\necho 'Installation completed successfully'",
             id, install_script
         );
         
@@ -934,6 +1179,7 @@ impl<'a> ContainerManager<'a> {
             cmd: Some(write_script_cmd.clone()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
+            tty: Some(true),
             ..Default::default()
         };
 
@@ -956,6 +1202,8 @@ impl<'a> ContainerManager<'a> {
             cmd: Some(run_script_cmd.iter().map(|s| s.to_string()).collect()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
+            tty: Some(true),
+            working_dir: Some("/home/container".to_string()),
             ..Default::default()
         };
 

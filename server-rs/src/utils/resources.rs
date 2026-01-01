@@ -91,3 +91,42 @@ pub fn get_package_resources(package_id: &str) -> Resources {
         },
     }
 }
+
+
+/// Parse memory string like "1GB", "512MB" to megabytes
+pub fn parse_memory_to_mb(s: &str) -> i64 {
+    let s = s.to_uppercase();
+    if let Some(n) = s.strip_suffix("GB") {
+        n.parse::<i64>().unwrap_or(1) * 1024
+    } else if let Some(n) = s.strip_suffix("MB") {
+        n.parse::<i64>().unwrap_or(512)
+    } else if let Some(n) = s.strip_suffix("G") {
+        n.parse::<i64>().unwrap_or(1) * 1024
+    } else if let Some(n) = s.strip_suffix("M") {
+        n.parse::<i64>().unwrap_or(512)
+    } else {
+        s.parse::<i64>().unwrap_or(512)
+    }
+}
+
+/// Parse disk string like "10GB", "5120MB" to megabytes
+pub fn parse_disk_to_mb(s: &str) -> i64 {
+    let s = s.to_uppercase();
+    if let Some(n) = s.strip_suffix("GB") {
+        n.parse::<i64>().unwrap_or(10) * 1024
+    } else if let Some(n) = s.strip_suffix("MB") {
+        n.parse::<i64>().unwrap_or(10240)
+    } else if let Some(n) = s.strip_suffix("G") {
+        n.parse::<i64>().unwrap_or(10) * 1024
+    } else if let Some(n) = s.strip_suffix("M") {
+        n.parse::<i64>().unwrap_or(10240)
+    } else {
+        s.parse::<i64>().unwrap_or(10240)
+    }
+}
+
+/// Parse CPU string like "1.0", "2" to percent (100 = 1 core)
+pub fn parse_cpu_to_percent(s: &str) -> i64 {
+    let val: f64 = s.parse().unwrap_or(1.0);
+    (val * 100.0) as i64
+}
