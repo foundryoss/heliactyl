@@ -27,9 +27,11 @@ import {
     ComputerDesktopIcon,
     ArrowsRightLeftIcon,
     WalletIcon,
-    CurrencyDollarIcon
+    CurrencyDollarIcon,
+    DocumentPlusIcon
 } from '@heroicons/react/24/outline'
 import { ChevronRightIcon } from '@heroicons/react/16/solid'
+import { PlusCircleIcon } from '@heroicons/react/24/solid'
 
 // Custom Panel Icon based on the close sidebar icon
 function PanelIcon({ className }: { className?: string }) {
@@ -60,10 +62,10 @@ export function Sidebar() {
     const linkClass = (path: string) => {
         const isActive = pathname === path
         return cn(
-            'group inline-flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors cursor-pointer border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 dark:focus-visible:ring-neutral-100 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-neutral-950',
+            'group inline-flex w-full items-center gap-2 px-2 py-1.5 text-xs transition-colors cursor-pointer border-l-2 focus-visible:outline-none',
             isActive
-                ? 'font-semibold text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-700/90 border-neutral-200 dark:border-transparent shadow-xs'
-                : 'font-medium text-neutral-700 dark:text-neutral-400 border-transparent dark:border-transparent hover:text-neutral-900 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800/70 hover:border-neutral-200 dark:hover:border-transparent'
+                ? 'font-medium text-red-400 dark:text-red-400 bg-neutral-900/50 dark:bg-neutral-950/80 border-red-500'
+                : 'font-medium text-neutral-500 dark:text-neutral-500 border-transparent hover:text-neutral-300 dark:hover:text-neutral-300 hover:bg-neutral-900/30 dark:hover:bg-neutral-950/50 hover:border-neutral-700'
         )
     }
 
@@ -74,56 +76,71 @@ export function Sidebar() {
             {/* Mobile backdrop */}
             {isMobile && !isCollapsed && (
                 <div 
-                    className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm"
+                    className="fixed inset-0 z-30 bg-black/80 backdrop-blur-sm"
                     onClick={toggleCollapsed}
                 />
             )}
             
             <aside className={cn(
-                "fixed inset-y-0 left-0 z-40 transition-all duration-300 ease-out",
+                "fixed inset-y-0 left-0 z-40 transition-all duration-300 ease-out bg-neutral-950 border-r border-neutral-800/50",
                 isMobile 
                     ? (isCollapsed ? "-translate-x-full" : "translate-x-0 w-64")
                     : (isCollapsed ? "w-0" : "w-64")
             )}>
                 <div className={cn(
-                    "flex h-full flex-col px-2 py-3 transition-opacity duration-300 ease-out",
+                    "flex h-full flex-col px-3 py-4 transition-opacity duration-300 ease-out",
                     // Mobile: always visible when not collapsed, Desktop: fade based on collapse
                     isMobile 
                         ? "opacity-100" 
                         : (isCollapsed ? "opacity-0 pointer-events-none" : "opacity-100")
                 )}>
-                    <div className="mb-2 px-1.5 flex items-center justify-between gap-2">
-                        <Link to="/">
-                            <img src="https://i.ibb.co/CKvj0n7b/modryth-19.png" alt="Altare Logo" className="h-5 invert dark:invert-0" />
+                    <div className="mb-6 px-1 flex items-center justify-between gap-2">
+                        <Link to="/" className="flex items-center gap-2">
+                            
+                            <span className="text-lg text-neutral-100 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>TORCH</span>
                         </Link>
                         <Tooltip content="Close sidebar" placement="right">
                             <button
                                 onClick={toggleCollapsed}
-                                className="inline-flex items-center justify-center w-6 h-6 rounded-md text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors focus:outline-none focus:ring-2 focus:ring-neutral-900 dark:focus:ring-neutral-100 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-neutral-950"
+                                className="inline-flex items-center justify-center w-6 h-6 text-neutral-500 hover:text-neutral-300 transition-colors focus:outline-none"
                             >
                                 <PanelIcon className="h-4 w-4" />
                             </button>
                         </Tooltip>
                     </div>
 
-                    <nav className="mt-1 relative space-y-0.5">
-                        <span className="text-[10px] font-medium text-neutral-500 tracking-widest pb-2 ml-2 dark:text-neutral-400" style={{ fontFamily: 'Space Mono, sans-serif' }}>HOSTING</span>
-                        <div className="w-full mt-1">
-                            <Link to="/" className={linkClass('/')}> <HomeIcon strokeWidth={2} className="h-4 w-4"/> <span>Dashboard</span></Link>
-                        </div>
-                        <Link to="/servers" className={linkClass('/servers')}> <ServerStackIcon strokeWidth={2} className="h-4 w-4"/> <span>Servers</span></Link>
+                    <nav className="mt-1 relative space-y-1">
+                        <span className="text-[9px] font-medium text-neutral-600 tracking-[0.2em] pb-2 ml-2 block" style={{ fontFamily: "'Space Mono', monospace" }}>HOSTING</span>
+                        <Link to="/" className={linkClass('/')} style={{ fontFamily: "'Space Mono', monospace" }}> 
+                            <HomeIcon strokeWidth={2} className="h-4 w-4"/> 
+                            <span>Dashboard</span>
+                        </Link>
+                        <Link to="/servers/create" className={linkClass('/servers/create')} style={{ fontFamily: "'Space Mono', monospace" }}> 
+                            <DocumentPlusIcon strokeWidth={2} className="h-4 w-4"/> 
+                            <span>Deploy</span>
+                        </Link>
+                        <Link to="/servers" className={linkClass('/servers')} style={{ fontFamily: "'Space Mono', monospace" }}> 
+                            <ServerStackIcon strokeWidth={2} className="h-4 w-4"/> 
+                            <span>Servers</span>
+                        </Link>
                         {user?.isAdmin ? (
-                            <Link to="/admin" className={linkClass('/admin')}> <Cog6ToothIcon strokeWidth={2} className="h-4 w-4"/> <span>Admin</span></Link>
+                            <Link to="/admin" className={linkClass('/admin')} style={{ fontFamily: "'Space Mono', monospace" }}> 
+                                <Cog6ToothIcon strokeWidth={2} className="h-4 w-4"/> 
+                                <span>Admin</span>
+                            </Link>
                         ) : null}
 
-                        <span className="text-[10px] font-medium text-neutral-500 tracking-widest pb-2 dark:text-neutral-400 ml-2 mt-2" style={{ fontFamily: 'Space Mono, sans-serif' }}>ECONOMY</span>
-                        <div className="w-full mt-1">
-                            <Link to="/billing" className={linkClass('/billing')}> <CurrencyDollarIcon strokeWidth={2} className="h-4 w-4"/> <span>Billing</span></Link>
+                        <div className="pt-4">
+                            <span className="text-[9px] font-medium text-neutral-600 tracking-[0.2em] pb-2 ml-2 block" style={{ fontFamily: "'Space Mono', monospace" }}>ECONOMY</span>
                         </div>
-                        <Link to="/wallet" className={linkClass('/wallet')}> <WalletIcon strokeWidth={2} className="h-4 w-4"/> <span>Wallet</span></Link>
+                        <Link to="/billing" className={linkClass('/billing')} style={{ fontFamily: "'Space Mono', monospace" }}> 
+                            <WalletIcon strokeWidth={2} className="h-4 w-4"/> 
+                            <span>Wallet</span>
+                        </Link>
+                        
                     </nav>
 
-                    <div className="mt-auto space-y-1">
+                    <div className="mt-auto space-y-3">
                         <ThemeToggle />
                         <UserDropdown />
                     </div>
@@ -142,17 +159,17 @@ function ThemeToggle() {
     ]
 
     return (
-        <div className="inline-flex items-center rounded-full ml-1 bg-neutral-200 dark:bg-neutral-800 p-0.5">
+        <div className="inline-flex items-center rounded-sm ml-1 bg-neutral-900/50 border border-neutral-800/50 p-0.5">
             {options.map(option => (
                 <button
                     key={option.value}
                     type="button"
                     onClick={() => setTheme(option.value as typeof theme)}
                     className={cn(
-                        'flex items-center justify-center h-6 w-6 rounded-full cursor-pointer transition-colors',
+                        'flex items-center justify-center h-6 w-6 rounded-sm cursor-pointer transition-colors',
                         theme === option.value
-                            ? 'bg-white dark:bg-neutral-700 text-neutral-900 dark:text-neutral-100 shadow-sm'
-                            : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100'
+                            ? 'bg-neutral-800 text-red-400 border border-neutral-700'
+                            : 'text-neutral-600 hover:text-neutral-400'
                     )}
                 >
                     {option.icon}
@@ -234,19 +251,20 @@ function UserDropdown() {
                 ref={buttonRef}
                 onClick={() => setOpen(!open)}
                 className={cn(
-                    'flex w-full items-center rounded-md hover:shadow-xs border border-transparent hover:border-neutral-200 dark:hover:border-transparent dark:hover:shadow-none px-2 py-2 text-left text-xs text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors duration-150 cursor-pointer',
-                    open && 'bg-neutral-50 dark:bg-neutral-800'
+                    'flex w-full items-center border border-neutral-800/50 px-2 py-2 text-left text-xs text-neutral-300 bg-neutral-900/50 hover:bg-neutral-900/80 transition-colors duration-150 cursor-pointer',
+                    open && 'bg-neutral-900/80'
                 )}
+                style={{ fontFamily: "'Space Mono', monospace" }}
                 aria-expanded={open}
             >
                 <div className="inline-flex items-center gap-2 min-w-0">
-                    <div className="w-5 h-5 rounded bg-yellow-500 border border-yellow-600/50 flex items-center justify-center flex-shrink-0">
-                        <span className="text-xs text-yellow-800 font-medium uppercase">{user?.username?.charAt(0) || 'U'}</span>
+                    <div className="w-5 h-5 bg-red-500 border border-red-600/50 flex items-center justify-center flex-shrink-0">
+                        <span className="text-xs text-red-900 font-bold uppercase">{user?.username?.charAt(0) || 'U'}</span>
                     </div>
                     <div className="flex flex-col min-w-0">
-                        <span className="truncate text-xs font-medium">{user?.username || 'Account'}</span>
+                        <span className="truncate text-xs font-medium text-neutral-200">{user?.username || 'Account'}</span>
                         {maskedEmail && (
-                            <span className="truncate text-[9px] text-neutral-500 dark:text-neutral-400 tracking-widest uppercase">{maskedEmail}</span>
+                            <span className="truncate text-[9px] text-neutral-600 tracking-widest uppercase">{maskedEmail}</span>
                         )}
                     </div>
                 </div>
@@ -255,22 +273,22 @@ function UserDropdown() {
             {open && (
                 <div
                     ref={containerRef}
-                    className="absolute bottom-full left-0 right-0 mb-1 origin-bottom overflow-visible rounded-md border border-neutral-200 dark:border-transparent bg-white dark:bg-neutral-800 shadow-xl z-50 animate-dropdown-in"
+                    className="absolute bottom-full left-0 right-0 mb-1 origin-bottom overflow-visible border border-neutral-800/50 bg-neutral-900 shadow-xl z-50 animate-dropdown-in"
                 >
                     <div className="p-2 space-y-1">
-                        <div className="px-2 py-1 pb-3 border-b border-neutral-100 dark:border-transparent mb-2">
-                            <div className="w-5 h-5 rounded bg-gray-200 dark:bg-white/10 flex items-center justify-center flex-shrink-0">
-                                <span className="text-xs text-gray-800 dark:text-gray-200 font-medium uppercase">{user?.username?.charAt(0) || 'U'}</span>
+                        <div className="px-2 py-1 pb-3 border-b border-neutral-800/50 mb-2">
+                            <div className="w-5 h-5 bg-red-500 border border-red-600/50 flex items-center justify-center flex-shrink-0">
+                                <span className="text-xs text-red-900 font-bold uppercase">{user?.username?.charAt(0) || 'U'}</span>
                             </div>
-                            <div className="text-xs mt-2 font-medium text-neutral-900 dark:text-neutral-100 truncate">{user?.username || 'Account'}</div>
-                            {maskedEmail && <div className="text-[10px] text-neutral-500 dark:text-neutral-400 tracking-widest uppercase truncate">{maskedEmail}</div>}
+                            <div className="text-xs mt-2 font-medium text-neutral-200 truncate" style={{ fontFamily: "'Space Mono', monospace" }}>{user?.username || 'Account'}</div>
+                            {maskedEmail && <div className="text-[10px] text-neutral-600 tracking-widest uppercase truncate" style={{ fontFamily: "'Space Mono', monospace" }}>{maskedEmail}</div>}
                         </div>
                         
                         <Link 
                             to="/account" 
                             onClick={handleClose}
-                            style={{ fontSize: '11px' }}
-                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-700 cursor-pointer transition-colors"
+                            style={{ fontSize: '11px', fontFamily: "'Space Mono', monospace" }}
+                            className="flex w-full items-center gap-2 px-2 py-1.5 text-xs text-neutral-300 hover:bg-neutral-800/70 hover:text-neutral-100 cursor-pointer transition-colors"
                         >
                             <UserIcon className="h-4 w-4"/>
                             <span>Account settings</span>
@@ -280,8 +298,8 @@ function UserDropdown() {
                             <button
                                 ref={tenantsTriggerRef}
                                 onClick={handleTenantsClick}
-                                style={{ fontSize: '11px' }}
-                                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-700 cursor-pointer transition-colors"
+                                style={{ fontSize: '11px', fontFamily: "'Space Mono', monospace" }}
+                                className="flex w-full items-center gap-2 px-2 py-1.5 text-xs text-neutral-300 hover:bg-neutral-800/70 hover:text-neutral-100 cursor-pointer transition-colors"
                             >
                                 <ArrowsRightLeftIcon className="h-4 w-4"/>
                                 <span>Switch tenant</span>
@@ -290,8 +308,8 @@ function UserDropdown() {
                             
                             <button 
                                 onClick={() => { logout(); handleClose() }}
-                                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-700 cursor-pointer transition-colors"
-                                    style={{ fontSize: '11px' }}
+                                className="flex w-full items-center gap-2 px-2 py-1.5 text-xs text-neutral-300 hover:bg-neutral-800/70 hover:text-neutral-100 cursor-pointer transition-colors"
+                                style={{ fontSize: '11px', fontFamily: "'Space Mono', monospace" }}
                             >
                                 <ArrowRightOnRectangleIcon className="h-4 w-4"/>
                                 Logout
@@ -305,7 +323,7 @@ function UserDropdown() {
             {tenantsOpen && typeof document !== 'undefined' && createPortal(
                 <div 
                     ref={tenantsRef}
-                    className="fixed w-64 rounded-md border border-neutral-200 dark:border-transparent bg-white dark:bg-neutral-800 shadow-xl z-[85] animate-dropdown-in"
+                    className="fixed w-64 border border-neutral-800/50 bg-neutral-900 shadow-xl z-[85] animate-dropdown-in"
                     style={{ 
                         left: tenantsPosition.left, 
                         bottom: tenantsPosition.bottom 
@@ -363,18 +381,18 @@ function TenantHub({ onBack, onClose, onOpenCreate, onOpenMembers, onOpenDelete 
     return (
         <div className="p-4 space-y-2">
             <div className="flex items-center gap-1">
-                <span className="text-xs font-medium text-neutral-800 dark:text-neutral-200">Tenants</span>
+                <span className="text-xs font-medium text-neutral-300" style={{ fontFamily: "'Space Mono', monospace" }}>Tenants</span>
                 <div className="ml-auto">
-                    <button style={{ fontSize: '11px' }} onClick={() => onOpenCreate?.()} className="inline-flex items-center gap-1 rounded-full bg-white dark:bg-neutral-700 px-1.5 py-1 text-[11px] text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-600 cursor-pointer transition-colors" type="button">
+                    <button style={{ fontSize: '11px', fontFamily: "'Space Mono', monospace" }} onClick={() => onOpenCreate?.()} className="inline-flex items-center gap-1 bg-neutral-800/70 border border-neutral-700 px-1.5 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100 cursor-pointer transition-colors" type="button">
                         <PlusIcon className="h-3 w-3"/> New tenant
                     </button>
                 </div>
             </div>
-            <div className="max-h-48 overflow-auto rounded border border-neutral-100 dark:border-transparent">
+            <div className="max-h-48 overflow-auto border border-neutral-800/50">
                 {tenants.length === 0 ? (
-                    <div className="p-2 text-center text-xs text-neutral-500 dark:text-neutral-400">No tenants yet</div>
+                    <div className="p-2 text-center text-xs text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>No tenants yet</div>
                 ) : (
-                        <ul ref={listRef} className="divide-y divide-neutral-100 dark:divide-neutral-700">
+                        <ul ref={listRef} className="divide-y divide-neutral-800/50">
                         {tenants.map((t) => (
                             <TenantListRow
                                 key={t.id}
@@ -398,14 +416,14 @@ function TenantListRow({ tenant, isCurrent, onSelect, onMembers, onDelete }: { t
     const btnRef = React.useRef<HTMLButtonElement | null>(null)
     const isOwner = tenant.role === 'owner'
     return (
-        <li className={cn('px-2 py-1.5 text-xs flex items-center justify-between', isCurrent && 'bg-neutral-50 dark:bg-neutral-700')}>
-            <button onClick={onSelect} className="truncate text-left w-full text-left cursor-pointer hover:bg-neutral-50 dark:hover:bg-neutral-600 rounded px-1 py-0.5 transition-colors">
-                {tenant.name} {isOwner ? <span className="ml-1 rounded bg-yellow-50 text-yellow-700 border border-yellow-200 px-1 py-0 text-[10px]">Owner</span> : null}
+        <li className={cn('px-2 py-1.5 text-xs flex items-center justify-between', isCurrent && 'bg-neutral-800/50')} style={{ fontFamily: "'Space Mono', monospace" }}>
+            <button onClick={onSelect} className="truncate text-left w-full text-left cursor-pointer hover:bg-neutral-800/70 text-neutral-300 hover:text-neutral-100 px-1 py-0.5 transition-colors">
+                {tenant.name} {isOwner ? <span className="ml-1 bg-red-500/20 text-red-400 border border-red-500/50 px-1 py-0 text-[10px]">Owner</span> : null}
             </button>
             {isOwner ? (
                 <div className="shrink-0 inline-flex items-center gap-1">
-                    <button ref={btnRef} type="button" onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v) }} className="inline-flex h-5 w-5 items-center justify-center rounded hover:bg-neutral-100 dark:hover:bg-neutral-600 cursor-pointer transition-colors">
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4 text-neutral-500 dark:text-neutral-400"><path fillRule="evenodd" d="M12 6.75a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 6a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm-1.5 7.5a1.5 1.5 0 103 0 1.5 1.5 0 00-3 0z" clipRule="evenodd"/></svg>
+                    <button ref={btnRef} type="button" onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v) }} className="inline-flex h-5 w-5 items-center justify-center hover:bg-neutral-800 cursor-pointer transition-colors">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4 text-neutral-500"><path fillRule="evenodd" d="M12 6.75a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 6a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm-1.5 7.5a1.5 1.5 0 103 0 1.5 1.5 0 00-3 0z" clipRule="evenodd"/></svg>
                     </button>
                     {menuOpen ? (
                         <MenuPortal anchorRef={btnRef} onClose={() => setMenuOpen(false)}>
@@ -417,7 +435,8 @@ function TenantListRow({ tenant, isCurrent, onSelect, onMembers, onDelete }: { t
                                         setMenuOpen(false);
                                         setTimeout(() => onMembers(), 10);
                                     }} 
-                                    className="flex w-full items-center rounded px-2 py-1.5 hover:bg-neutral-50 dark:hover:bg-neutral-700 cursor-pointer transition-colors"
+                                    className="flex w-full items-center px-2 py-1.5 hover:bg-neutral-800/70 text-neutral-300 hover:text-neutral-100 cursor-pointer transition-colors"
+                                    style={{ fontFamily: "'Space Mono', monospace" }}
                                 >
                                     <span>Members</span>
                                 </button>
@@ -428,7 +447,8 @@ function TenantListRow({ tenant, isCurrent, onSelect, onMembers, onDelete }: { t
                                         setMenuOpen(false);
                                         setTimeout(() => onDelete(), 10);
                                     }} 
-                                    className="flex w-full items-center rounded px-2 py-1.5 hover:bg-neutral-50 dark:hover:bg-neutral-700 text-red-600 dark:text-red-400 cursor-pointer transition-colors"
+                                    className="flex w-full items-center px-2 py-1.5 hover:bg-neutral-800/70 text-red-400 hover:text-red-300 cursor-pointer transition-colors"
+                                    style={{ fontFamily: "'Space Mono', monospace" }}
                                 >
                                     <span>Delete tenant</span>
                                 </button>
@@ -681,7 +701,7 @@ function MenuPortal({ anchorRef, onClose, children }: { anchorRef: React.RefObje
     }, [onClose, anchorRef])
     if (typeof document === 'undefined') return null
     return createPortal(
-        <div id="tenant-menu-popover" style={{ position: 'fixed', left: pos.left, top: pos.top, zIndex: 87 }} className="min-w-[160px] overflow-hidden rounded-md border border-neutral-200 dark:border-transparent bg-white dark:bg-neutral-800 shadow-xl">
+        <div id="tenant-menu-popover" style={{ position: 'fixed', left: pos.left, top: pos.top, zIndex: 87 }} className="min-w-[160px] overflow-hidden border border-neutral-800/50 bg-neutral-900 shadow-xl">
             {children}
         </div>,
         document.body

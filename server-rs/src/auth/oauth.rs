@@ -19,6 +19,7 @@ pub struct AppState {
     pub session_manager: Arc<SessionManager>,
     pub audit: Arc<crate::database::audit::AuditService>,
     pub daemon_client: Arc<crate::daemon::DaemonClient>,
+    pub config: Arc<crate::heli::parse::HeliConfig>,
 }
 
 pub async fn register(

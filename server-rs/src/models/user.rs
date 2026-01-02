@@ -29,9 +29,7 @@ pub struct UserWallet {
     #[serde(default)]
     pub ru_balance: f64,  // Resource Units balance
     #[serde(default)]
-    pub currency_balance: f64,  // USD balance for purchasing RU
-    #[serde(default)]
-    pub currency: String,
+    pub used_resource_units: f64,  // Total RU used (for tracking)
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,8 +74,7 @@ impl User {
             data: Vec::new(),
             wallet: UserWallet {
                 ru_balance: 0.0,
-                currency_balance: 0.0,
-                currency: "USD".to_string(),
+                used_resource_units: 0.0,
             },
         }
     }

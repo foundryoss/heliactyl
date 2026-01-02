@@ -127,13 +127,18 @@ fn generate_port_env_vars(allocated_ports: &HashMap<String, String>) -> Vec<Stri
 }
 
 /// Container management operations
-pub struct ContainerManager<'a> {
-    client: &'a Docker,
+pub struct ContainerManager {
+    client: Docker,
 }
 
-impl<'a> ContainerManager<'a> {
-    pub fn new(client: &'a Docker) -> Self {
+impl ContainerManager {
+    pub fn new(client: Docker) -> Self {
         Self { client }
+    }
+    
+    /// Create from a reference (clones the Docker client)
+    pub fn from_ref(client: &Docker) -> Self {
+        Self { client: client.clone() }
     }
 
     /// Create a new container with automatic port allocation and volume binding
@@ -516,40 +521,113 @@ impl<'a> ContainerManager<'a> {
         }
     }
 
-    /// Stop a container gracefully
+    /// Stop a container gracefully with timeout, falls back to kill if needed
     pub async fn stop(&self, id: &str) -> anyhow::Result<()> {
-        let options = StopContainerOptions { t: 10 };
-        match self.client.stop_container(id, Some(options)).await {
-            Ok(_) => {
+        // First try graceful stop with 5 second timeout
+        let options = StopContainerOptions { t: 5 };
+        
+        // Use tokio timeout to ensure we don't hang forever
+        let stop_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.client.stop_container(id, Some(options))
+        ).await;
+        
+        match stop_result {
+            Ok(Ok(_)) => {
                 info!("Stopped container: {}", id);
-                Ok(())
+                return Ok(());
             }
-            Err(bollard::errors::Error::JsonSerdeError { .. }) => {
+            Ok(Err(bollard::errors::Error::JsonSerdeError { .. })) => {
                 info!("Container {} stopped successfully (empty response)", id);
+                return Ok(());
+            }
+            Ok(Err(bollard::errors::Error::DockerResponseServerError { status_code: 304, .. })) => {
+                // Container already stopped
+                info!("Container {} was already stopped", id);
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                warn!("Graceful stop failed for container {}: {}, attempting force kill", id, e);
+            }
+            Err(_) => {
+                warn!("Graceful stop timed out for container {}, attempting force kill", id);
+            }
+        }
+        
+        // Graceful stop failed or timed out - force kill
+        self.force_stop(id).await
+    }
+    
+    /// Force stop a container using SIGKILL with timeout
+    pub async fn force_stop(&self, id: &str) -> anyhow::Result<()> {
+        let kill_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.client.kill_container(id, Some(KillContainerOptions { signal: "SIGKILL" }))
+        ).await;
+        
+        match kill_result {
+            Ok(Ok(_)) => {
+                info!("Force killed container: {}", id);
                 Ok(())
             }
-            Err(e) => {
-                error!("Failed to stop container {}: {}", id, e);
+            Ok(Err(bollard::errors::Error::JsonSerdeError { .. })) => {
+                info!("Container {} force killed successfully (empty response)", id);
+                Ok(())
+            }
+            Ok(Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. })) => {
+                // Container doesn't exist anymore
+                info!("Container {} no longer exists", id);
+                Ok(())
+            }
+            Ok(Err(bollard::errors::Error::DockerResponseServerError { status_code: 409, .. })) => {
+                // Container not running - that's fine
+                info!("Container {} is not running (already stopped)", id);
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                error!("Failed to force kill container {}: {}", id, e);
                 Err(e.into())
+            }
+            Err(_) => {
+                error!("Force kill timed out for container {} - Docker daemon may be unresponsive", id);
+                Err(anyhow::anyhow!("Force kill timed out - Docker daemon unresponsive"))
             }
         }
     }
 
-    /// Kill a container forcefully
+    /// Kill a container forcefully with timeout
     pub async fn kill(&self, id: &str) -> anyhow::Result<()> {
         let options = KillContainerOptions { signal: "SIGKILL" };
-        match self.client.kill_container(id, Some(options)).await {
-            Ok(_) => {
+        
+        let kill_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.client.kill_container(id, Some(options))
+        ).await;
+        
+        match kill_result {
+            Ok(Ok(_)) => {
                 info!("Killed container: {}", id);
                 Ok(())
             }
-            Err(bollard::errors::Error::JsonSerdeError { .. }) => {
+            Ok(Err(bollard::errors::Error::JsonSerdeError { .. })) => {
                 info!("Container {} killed successfully (empty response)", id);
                 Ok(())
             }
-            Err(e) => {
+            Ok(Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. })) => {
+                info!("Container {} no longer exists", id);
+                Ok(())
+            }
+            Ok(Err(bollard::errors::Error::DockerResponseServerError { status_code: 409, .. })) => {
+                info!("Container {} is not running", id);
+                Ok(())
+            }
+            Ok(Err(e)) => {
                 error!("Failed to kill container {}: {}", id, e);
                 Err(e.into())
+            }
+            Err(_) => {
+                error!("Kill command timed out for container {} - Docker daemon may be unresponsive", id);
+                Err(anyhow::anyhow!("Kill timed out - Docker daemon unresponsive"))
             }
         }
     }

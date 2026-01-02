@@ -2,6 +2,25 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* LCD14Condensed font (loaded from external CDN) */
+@font-face {
+  font-family: 'LCD14Condensed';
+  src: url('https://cf-data.pkg.lat/fonts/LCD14Condensed.otf') format('opentype');
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+    font-family: 'Seven Segment';
+    font-style: normal;
+    font-weight: 400;
+    src: local('Seven Segment'), url('https://fonts.cdnfonts.com/s/71640/Seven Segment.woff') format('woff');
+}
+
+
+
+
 :root {
   color-scheme: light;
 }
@@ -19,7 +38,9 @@ body,
   transition: background-color 200ms ease, color 200ms ease;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /*font-family: 'LCD14Condensed', 'Geist', sans-serif;*/
 }
+
 
 /* Form element normalization */
 input, select, textarea, button { font: inherit; }

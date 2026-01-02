@@ -66,6 +66,7 @@ export function createApi(baseUrl: string, getToken: () => string | null) {
 			create: (tenantId: string, data: { name: string; description?: string; serverSoftwareId: string; nodeId: string; volumes?: any[]; network?: any; limits?: any; env?: Record<string, string>; startup?: any }) => request<{ id: string; containerId: string; name: string; state: string; ports: any[] }>(`api/tenants/${tenantId}/servers`, { method: 'POST', body: JSON.stringify(data) }),
 			delete: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}`, { method: 'DELETE' }),
 			websocket: (tenantId: string, id: string) => request<{ token: string; socket: string }>(`api/tenants/${tenantId}/servers/${id}/websocket`),
+			logs: (tenantId: string, id: string, tail?: string) => request<{ logs: string }>(`api/tenants/${tenantId}/servers/${id}/logs${tail ? `?tail=${tail}` : ''}`),
 			// Power actions
 			start: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/start`, { method: 'POST' }),
 			stop: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/stop`, { method: 'POST' }),
@@ -78,9 +79,26 @@ export function createApi(baseUrl: string, getToken: () => string | null) {
 			addFunds: (tenantId: string, amount: number) => request<{ balance: number; currency: string }>(`api/tenants/${tenantId}/billing/add-funds`, { method: 'POST', body: JSON.stringify({ amount }) }),
 			getConfig: () => request<any>('api/billing/config'),
 		},
+		wallet: {
+			get: () => request<{ ruBalance: number; usedResourceUnits: number }>('api/wallet'),
+			getTransactions: (page = 1, pageSize = 20) => request<{ items: any[]; meta: any }>(`api/wallet/transactions?page=${page}&pageSize=${pageSize}`),
+			addRU: (amount: number) => request<{ ruBalance: number; added: number }>('api/wallet/ru/add', { method: 'POST', body: JSON.stringify({ amount }) }),
+			deductRU: (amount: number, reason?: string) => request<{ ruBalance: number; deducted: number }>('api/wallet/ru/deduct', { method: 'POST', body: JSON.stringify({ amount, reason }) }),
+			getRUEstimate: (nodeId: string, params?: { cpu?: string; memory?: string; disk?: string }) => {
+				const query = new URLSearchParams()
+				if (params?.cpu) query.set('cpu', params.cpu)
+				if (params?.memory) query.set('memory', params.memory)
+				if (params?.disk) query.set('disk', params.disk)
+				const qs = query.toString()
+				return request<{ ruPerHour: number; ruPerDay: number; ruPerMonth: number; pricePerHour: number; pricePerDay: number; pricePerMonth: number; limits: any }>(`api/wallet/ru/estimate/${nodeId}${qs ? '?' + qs : ''}`)
+			},
+		},
 		admin: {
 			users: () => request<{ items: any[] }>('api/admin/users'),
 			setAdmin: (id: string, isAdmin: boolean) => request<{ ok: boolean }>(`api/admin/users/${id}/admin`, { method: 'POST', body: JSON.stringify({ isAdmin }) }),
+			giveResourceUnits: (userId: string, amount: number, reason?: string) => request<{ userId: string; amount: number; newBalance: number }>('api/admin/ru/give', { method: 'POST', body: JSON.stringify({ user_id: userId, amount, reason }) }),
+			setResourceUnits: (userId: string, balance: number, reason?: string) => request<{ userId: string; oldBalance: number; newBalance: number; difference: number }>('api/admin/ru/set', { method: 'POST', body: JSON.stringify({ user_id: userId, balance, reason }) }),
+			getUserWallet: (userId: string) => request<{ userId: string; ruBalance: number; usedResourceUnits: number }>(`api/admin/users/${userId}/wallet`),
 			tenants: () => request<{ items: any[] }>('api/admin/tenants'),
 			updateTenantExtras: (id: string, body: { extraMemoryMb?: number; extraDiskMb?: number; extraCpuPercent?: number; extraServerSlots?: number }) =>
 				request<{ ok: boolean }>(`api/admin/tenants/${id}/extras`, { method: 'POST', body: JSON.stringify(body) }),
@@ -100,19 +118,6 @@ export function createApi(baseUrl: string, getToken: () => string | null) {
 			createSoftware: (data: any) => request<{ ok: boolean; id: string }>('api/admin/software', { method: 'POST', body: JSON.stringify(data) }),
 			updateSoftware: (id: string, data: any) => request<{ ok: boolean }>(`api/admin/software/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 			deleteSoftware: (id: string) => request<{ ok: boolean }>(`api/admin/software/${id}`, { method: 'DELETE' }),
-		},
-		wallet: {
-			get: () => request<{ ruBalance: number; currencyBalance: number; currency: string }>('api/wallet'),
-			addRU: (amount: number) => request<{ ruBalance: number; added: number }>('api/wallet/ru/add', { method: 'POST', body: JSON.stringify({ amount }) }),
-			deductRU: (amount: number, reason?: string) => request<{ ruBalance: number; deducted: number }>('api/wallet/ru/deduct', { method: 'POST', body: JSON.stringify({ amount, reason }) }),
-			getRUEstimate: (nodeId: string, params?: { cpu?: string; memory?: string; disk?: string }) => {
-				const query = new URLSearchParams()
-				if (params?.cpu) query.set('cpu', params.cpu)
-				if (params?.memory) query.set('memory', params.memory)
-				if (params?.disk) query.set('disk', params.disk)
-				const qs = query.toString()
-				return request<{ ruPerHour: number; ruPerDay: number; ruPerMonth: number; pricePerHour: number; pricePerDay: number; pricePerMonth: number; limits: any }>(`api/wallet/ru/estimate/${nodeId}${qs ? '?' + qs : ''}`)
-			},
 		},
 	}
 }

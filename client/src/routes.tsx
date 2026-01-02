@@ -9,7 +9,8 @@ import { WalletPage } from '@/pages/Wallet'
 import { BillingPage } from '@/pages/Billing'
 import React, { useEffect } from 'react'
 import { ServersPage } from '@/pages/Servers'
-import { ServerRoutes } from '@/pages/server'
+import { ServerCreatePage } from '@/pages/ServerCreate'
+import { ServerRoutes, ServerCreatePreflightPage } from '@/pages/server'
 
 import { useTenants } from '@/providers/TenantProvider'
 import { Sidebar } from '@/components/Sidebar'
@@ -88,9 +89,11 @@ export function AppRoutes() {
 				<Route element={<PrivateRoute />}>
 					<Route index element={<DashboardPage />} />
                     <Route path="servers" element={<ServersPage />} />
+                    <Route path="servers/create" element={<ServerCreatePage />} />
+                    <Route path="servers/create/preflight" element={<ServerCreatePreflightPage />} />
                     <Route path="server/:serverId/*" element={<ServerRoutes />} />
                     <Route path="billing" element={<BillingPage />} />
-                    <Route path="wallet" element={<WalletPage />} />
+                    {/*<Route path="wallet" element={<WalletPage />} />*/}
 					<Route path="account" element={<AccountPage />} />
 				</Route>
 				<Route path="*" element={<Navigate to="/" replace />} />

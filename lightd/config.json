@@ -17,12 +17,17 @@
     "enabled": true,
     "interval_ms": 1000,
     "ru_config": {
-      "cpu_weight": 1.0,
-      "memory_weight": 0.5,
-      "io_weight": 2.0,
-      "network_weight": 1.5,
-      "storage_weight": 0.8,
+      "cpu_weight": 10.0,
+      "memory_weight": 50,
+      "io_weight": 20.0,
+      "network_weight": 1.95,
+      "storage_weight": 10.8,
       "base_ru": 0.1
+    },
+    "remote": {
+      "url": "http://localhost:8787",
+      "secret": "lightd-secret-key-2024-ru-deduct",
+      "enabled": true
     }
   }
 }

@@ -8,8 +8,9 @@ pub mod container_tracker;
 pub mod state_manager;
 pub mod monitoring;
 pub mod websocket;
-//pub mod cli;
+pub mod services;
 
 pub use config::Config;
 pub use docker::DockerClient;
 pub use types::AppState;
+pub use services::PowerActionService;

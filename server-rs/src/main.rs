@@ -134,6 +134,10 @@ async fn start_server(config_path: &str) {
     let daemon_client = Arc::new(daemon::DaemonClient::new(daemon_url, daemon_api_key));
     colorize_println("  ✓ Daemon client initialized", Colors::BrightGreenFg);
 
+    // Check if load balancing is enabled (before moving heli_config)
+    let servers_config = heli_config.get_servers();
+    let load_balancer_enabled = servers_config.is_some() && !servers_config.as_ref().unwrap().is_empty();
+
     // Setup app state
     let jwt_secret = heli_config.get_string("key").unwrap_or("default-secret-key".to_string());
     let app_state = Arc::new(auth::oauth::AppState {
@@ -142,6 +146,7 @@ async fn start_server(config_path: &str) {
         session_manager: session_manager.clone(),
         audit: audit_service,
         daemon_client,
+        config: Arc::new(heli_config.clone()),
     });
 
     // Setup auth state for protected routes
@@ -149,10 +154,6 @@ async fn start_server(config_path: &str) {
         session_manager,
         mongo: app_state.mongo.clone(),
     });
-
-    // Check if load balancing is enabled
-    let servers_config = heli_config.get_servers();
-    let load_balancer_enabled = servers_config.is_some() && !servers_config.as_ref().unwrap().is_empty();
 
     let app = if load_balancer_enabled {
         colorize_println("Load Balancer Configuration:", Colors::BrightGreenFg);
@@ -233,16 +234,18 @@ async fn start_server(config_path: &str) {
             .route("/api/tenants/{tenant_id}/servers/{server_id}/stop", axum::routing::post(routes::servers::stop_server))
             .route("/api/tenants/{tenant_id}/servers/{server_id}/restart", axum::routing::post(routes::servers::restart_server))
             .route("/api/tenants/{tenant_id}/servers/{server_id}/kill", axum::routing::post(routes::servers::kill_server))
-            .route("/api/tenants/{tenant_id}/billing", get(routes::billing::get_tenant_billing))
-            .route("/api/tenants/{tenant_id}/billing/transactions", get(routes::billing::get_billing_transactions))
-            .route("/api/tenants/{tenant_id}/billing/add-funds", axum::routing::post(routes::billing::add_funds))
-            .route("/api/billing/config", get(routes::billing::get_billing_config))
+            .route("/api/tenants/{tenant_id}/servers/{server_id}/logs", get(routes::servers::get_server_logs))
+            .route("/api/tenants/{tenant_id}/servers/{server_id}/websocket", get(routes::servers::get_server_websocket))
             // Wallet routes
             .route("/api/wallet", get(routes::wallet::get_wallet))
+            .route("/api/wallet/transactions", get(routes::wallet::get_ru_transactions))
             .route("/api/wallet/ru/add", axum::routing::post(routes::wallet::add_ru_credits))
             .route("/api/wallet/ru/deduct", axum::routing::post(routes::wallet::deduct_ru_credits))
             .route("/api/wallet/ru/estimate/{node_id}", get(routes::wallet::get_ru_estimate))
             // Admin routes
+            .route("/api/admin/ru/give", axum::routing::post(routes::wallet::admin_give_credits))
+            .route("/api/admin/ru/set", axum::routing::post(routes::wallet::admin_set_credits))
+            .route("/api/admin/users/{user_id}/wallet", get(routes::wallet::admin_get_user_wallet))
             .route("/api/admin/users", get(routes::admin::list_users))
             .route("/api/admin/users/{user_id}", get(routes::admin::get_user))
             .route("/api/admin/users/{user_id}", axum::routing::patch(routes::admin::update_user))
@@ -259,6 +262,8 @@ async fn start_server(config_path: &str) {
             .route("/api/admin/software", axum::routing::post(routes::admin::create_software))
             .route("/api/admin/software/{software_id}", axum::routing::patch(routes::admin::update_software))
             .route("/api/admin/software/{software_id}", axum::routing::delete(routes::admin::delete_software))
+            // Config routes (admin only)
+            .route("/api/admin/config", get(routes::config::get_config))
             .layer(axum::middleware::from_fn_with_state(
                 auth_state.clone(),
                 middleware::auth::auth_middleware
@@ -272,8 +277,9 @@ async fn start_server(config_path: &str) {
             .route("/api/", get(routes::api::root))
             .route("/api/auth/register", axum::routing::post(auth::oauth::register))
             .route("/api/auth/login", axum::routing::post(auth::oauth::login))
+            // Lightd daemon endpoint (uses API key auth, not session auth)
+            .route("/api/lightd/deduct", axum::routing::post(routes::wallet::daemon_deduct_credits))
             .route("/status", get(routes::basic::status))
-            .route("/ws", get(routes::websocket::websocket_handler))
             .merge(protected_routes)
             .fallback(any(serve_index))
             .layer(axum::middleware::from_fn(move |req, next| {

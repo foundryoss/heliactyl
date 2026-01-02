@@ -531,3 +531,101 @@ pub async fn kill_server(
     
     Ok(Json(json!({ "ok": true })))
 }
+
+/// Get server logs
+pub async fn get_server_logs(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let tail = params.get("tail").map(|s| s.as_str());
+    
+    let logs = daemon.get_container_logs(&server.container_id, tail).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "logs": logs })))
+}
+
+
+/// Get WebSocket credentials for a server
+/// This generates a token from lightd and returns the WebSocket URL
+pub async fn get_server_websocket(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let db = state.mongo.database();
+    let tenants_collection = db.collection::<Tenant>("tenants");
+    let servers_collection = db.collection::<Server>("servers");
+    let nodes_collection = db.collection::<crate::models::node::Node>("nodes");
+    
+    // Check membership
+    let tenant = tenants_collection
+        .find_one(doc! { "_id": mongodb::bson::oid::ObjectId::parse_str(&tenant_id).ok() })
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "Database error" }))))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({ "error": "Tenant not found" }))))?;
+    
+    if !tenant.members.iter().any(|m| m.user_id == user_id) {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "Forbidden" }))));
+    }
+    
+    // Get server
+    let server = servers_collection
+        .find_one(doc! {
+            "_id": mongodb::bson::oid::ObjectId::parse_str(&server_id).ok(),
+            "tenant_id": &tenant_id
+        })
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "Database error" }))))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({ "error": "Server not found" }))))?;
+    
+    // Get node
+    let node = nodes_collection
+        .find_one(doc! { "_id": mongodb::bson::oid::ObjectId::parse_str(&server.node_id).ok() })
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "Database error" }))))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({ "error": "Node not found" }))))?;
+    
+    // Generate token from lightd
+    let daemon_url = format!("{}://{}", node.network.scheme, node.network.uri);
+    let token_url = format!("{}/websocket/generate?container_id={}", daemon_url, server.container_id);
+    
+    let client = reqwest::Client::new();
+    let response = client.get(&token_url).send().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": format!("Failed to connect to daemon: {}", e) }))))?;
+    
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, Json(json!({ "error": format!("Daemon error: {}", error_text) }))));
+    }
+    
+    let json: serde_json::Value = response.json().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": format!("Invalid response: {}", e) }))))?;
+    
+    let success = json["success"].as_bool().unwrap_or(false);
+    if !success {
+        let msg = json["message"].as_str().unwrap_or("Unknown error");
+        return Err((StatusCode::BAD_GATEWAY, Json(json!({ "error": msg }))));
+    }
+    
+    let data = json.get("data").ok_or_else(|| (StatusCode::BAD_GATEWAY, Json(json!({ "error": "No data in response" }))))?;
+    let token = data["token"].as_str().ok_or_else(|| (StatusCode::BAD_GATEWAY, Json(json!({ "error": "No token in response" }))))?;
+    
+    // Build WebSocket URL
+    let ws_scheme = if node.network.scheme == "https" { "wss" } else { "ws" };
+    let socket_url = format!("{}://{}/websocket?token={}", ws_scheme, node.network.uri, token);
+    
+    Ok(Json(json!({
+        "token": token,
+        "socket": socket_url,
+        "expiresAt": data["expires_at"]
+    })))
+}

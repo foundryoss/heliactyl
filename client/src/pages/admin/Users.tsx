@@ -8,12 +8,20 @@ import { Input } from '@/components/ui/Input'
 import Label from '@/components/ui/Label'
 import { cn } from '@/utils/cn'
 import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from '@/components/ui/DropdownMenu'
+import {
 	ShieldCheckIcon,
 	TrashIcon,
 	PencilIcon,
 	MagnifyingGlassIcon,
 	KeyIcon,
 	EllipsisVerticalIcon,
+	CurrencyDollarIcon,
 } from '@heroicons/react/24/outline'
 
 interface User {
@@ -36,7 +44,7 @@ export function AdminUsers() {
 	const [editUser, setEditUser] = useState<User | null>(null)
 	const [deleteUser, setDeleteUser] = useState<User | null>(null)
 	const [resetPasswordUser, setResetPasswordUser] = useState<User | null>(null)
-	const [menuOpen, setMenuOpen] = useState<string | null>(null)
+	const [resourceUnitsUser, setResourceUnitsUser] = useState<User | null>(null)
 
 	const fetchUsers = useCallback(async () => {
 		try {
@@ -62,7 +70,6 @@ export function AdminUsers() {
 		} catch (e: any) {
 			notify({ type: 'error', title: 'Failed to update', description: e?.message })
 		}
-		setMenuOpen(null)
 	}
 
 	const filteredUsers = users.filter(
@@ -95,7 +102,7 @@ export function AdminUsers() {
 
 			{/* Users Table */}
 			<div className="bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg overflow-hidden">
-				<table className="w-full text-sm">
+				<table className="w-full text-sm w-full">
 					<thead className="bg-neutral-50 dark:bg-neutral-900">
 						<tr>
 							<th className="text-left px-4 py-3 font-medium text-neutral-600 dark:text-neutral-300">User</th>
@@ -105,7 +112,7 @@ export function AdminUsers() {
 							<th className="text-right px-4 py-3 font-medium text-neutral-600 dark:text-neutral-300">Actions</th>
 						</tr>
 					</thead>
-					<tbody className="divide-y divide-neutral-200 dark:divide-neutral-700">
+					<tbody className="divide-y divide-neutral-200 dark:divide-neutral-700 mb-30">
 						{loading ? (
 							<tr>
 								<td colSpan={5} className="px-4 py-8 text-center text-neutral-500">Loading...</td>
@@ -146,58 +153,44 @@ export function AdminUsers() {
 										{new Date(user.created_at).toLocaleDateString()}
 									</td>
 									<td className="px-4 py-3">
-										<div className="flex items-center justify-end relative">
-											<button
-												onClick={() => setMenuOpen(menuOpen === user.id ? null : user.id)}
-												className="p-1.5 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-colors"
-											>
-												<EllipsisVerticalIcon className="h-5 w-5 text-neutral-500" />
-											</button>
-
-											{menuOpen === user.id && (
-												<div className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg z-10">
-													<div className="p-1">
-														<button
-															onClick={() => { setEditUser(user); setMenuOpen(null) }}
-															className="flex items-center gap-2 w-full px-3 py-2 text-sm text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700 rounded"
-														>
-															<PencilIcon className="h-4 w-4" /> Edit Details
-														</button>
-														<button
-															onClick={() => { setResetPasswordUser(user); setMenuOpen(null) }}
-															className="flex items-center gap-2 w-full px-3 py-2 text-sm text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700 rounded"
-														>
-															<KeyIcon className="h-4 w-4" /> Reset Password
-														</button>
-														<button
-															onClick={() => handleToggleAdmin(user)}
-															disabled={user.id === currentUser?.id}
-															className={cn(
-																'flex items-center gap-2 w-full px-3 py-2 text-sm rounded',
-																user.id === currentUser?.id
-																	? 'text-neutral-400 cursor-not-allowed'
-																	: 'text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700'
-															)}
-														>
-															<ShieldCheckIcon className="h-4 w-4" />
-															{user.is_admin ? 'Remove Admin' : 'Make Admin'}
-														</button>
-														<hr className="my-1 border-neutral-200 dark:border-neutral-700" />
-														<button
-															onClick={() => { setDeleteUser(user); setMenuOpen(null) }}
-															disabled={user.id === currentUser?.id}
-															className={cn(
-																'flex items-center gap-2 w-full px-3 py-2 text-sm rounded',
-																user.id === currentUser?.id
-																	? 'text-neutral-400 cursor-not-allowed'
-																	: 'text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20'
-															)}
-														>
-															<TrashIcon className="h-4 w-4" /> Delete User
-														</button>
-													</div>
-												</div>
-											)}
+										<div className="flex items-center justify-end">
+											<DropdownMenu>
+												<DropdownMenuTrigger asChild>
+													<button className="p-1.5 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-colors">
+														<EllipsisVerticalIcon className="h-5 w-5 text-neutral-500" />
+													</button>
+												</DropdownMenuTrigger>
+												<DropdownMenuContent align="end" className="w-48">
+													<DropdownMenuItem onClick={() => setEditUser(user)}>
+														<PencilIcon className="h-4 w-4 mr-2" />
+														Edit Details
+													</DropdownMenuItem>
+													<DropdownMenuItem onClick={() => setResetPasswordUser(user)}>
+														<KeyIcon className="h-4 w-4 mr-2" />
+														Reset Password
+													</DropdownMenuItem>
+													<DropdownMenuItem onClick={() => setResourceUnitsUser(user)}>
+														<CurrencyDollarIcon className="h-4 w-4 mr-2" />
+														Manage Resource Units
+													</DropdownMenuItem>
+													<DropdownMenuItem
+														onClick={() => handleToggleAdmin(user)}
+														disabled={user.id === currentUser?.id}
+													>
+														<ShieldCheckIcon className="h-4 w-4 mr-2" />
+														{user.is_admin ? 'Remove Admin' : 'Make Admin'}
+													</DropdownMenuItem>
+													<DropdownMenuSeparator />
+													<DropdownMenuItem
+														onClick={() => setDeleteUser(user)}
+														disabled={user.id === currentUser?.id}
+														className="text-red-600 dark:text-red-400 focus:text-red-600 dark:focus:text-red-400"
+													>
+														<TrashIcon className="h-4 w-4 mr-2" />
+														Delete User
+													</DropdownMenuItem>
+												</DropdownMenuContent>
+											</DropdownMenu>
 										</div>
 									</td>
 								</tr>
@@ -211,6 +204,7 @@ export function AdminUsers() {
 			<EditUserModal user={editUser} onClose={() => setEditUser(null)} onSave={fetchUsers} />
 			<DeleteUserModal user={deleteUser} onClose={() => setDeleteUser(null)} onDelete={fetchUsers} />
 			<ResetPasswordModal user={resetPasswordUser} onClose={() => setResetPasswordUser(null)} />
+			<ManageResourceUnitsModal user={resourceUnitsUser} onClose={() => setResourceUnitsUser(null)} />
 		</div>
 	)
 }
@@ -392,6 +386,165 @@ function ResetPasswordModal({ user, onClose }: { user: User | null; onClose: () 
 					<Button type="submit" variant="primary" size="sm" isLoading={loading}>Reset Password</Button>
 				</div>
 			</form>
+		</Modal>
+	)
+}
+
+
+function ManageResourceUnitsModal({ user, onClose }: { user: User | null; onClose: () => void }) {
+	const { token } = useAuth()
+	const getTokenFn = useCallback(() => token, [token])
+	const api = useApi(getTokenFn)
+	const { notify } = useAlert()
+
+	const [balance, setBalance] = useState<number>(0)
+	const [currentBalance, setCurrentBalance] = useState<number>(0)
+	const [reason, setReason] = useState('')
+	const [loading, setLoading] = useState(false)
+	const [fetching, setFetching] = useState(true)
+
+	useEffect(() => {
+		if (user) {
+			setFetching(true)
+			api.admin.getUserWallet(user.id)
+				.then((res) => {
+					setCurrentBalance(res.ruBalance)
+					setBalance(res.ruBalance)
+				})
+				.catch((e) => {
+					notify({ type: 'error', title: 'Failed to load wallet', description: e?.message })
+				})
+				.finally(() => setFetching(false))
+		} else {
+			setBalance(0)
+			setCurrentBalance(0)
+			setReason('')
+		}
+	}, [user, api, notify])
+
+	const handleSubmit = async (e: React.FormEvent) => {
+		e.preventDefault()
+		if (!user) return
+
+		setLoading(true)
+		try {
+			const res = await api.admin.setResourceUnits(user.id, balance, reason || undefined)
+			notify({ 
+				type: 'success', 
+				title: 'Resource Units updated', 
+				description: `Balance changed from ${res.oldBalance.toFixed(2)} to ${res.newBalance.toFixed(2)} RU` 
+			})
+			setCurrentBalance(res.newBalance)
+			onClose()
+		} catch (e: any) {
+			notify({ type: 'error', title: 'Failed to update resource units', description: e?.message })
+		} finally {
+			setLoading(false)
+		}
+	}
+
+	const handleQuickAdd = (amount: number) => {
+		setBalance(prev => Math.max(0, prev + amount))
+	}
+
+	return (
+		<Modal open={!!user} onClose={onClose} title="Manage Resource Units" subtitle={user?.username}>
+			{fetching ? (
+				<div className="py-8 text-center text-neutral-500">Loading wallet...</div>
+			) : (
+				<form onSubmit={handleSubmit} className="space-y-4">
+					<div className="bg-neutral-100 dark:bg-neutral-900 rounded-lg p-4">
+						<div className="text-sm text-neutral-500 dark:text-neutral-400">Current Balance</div>
+						<div className="text-2xl font-semibold text-neutral-900 dark:text-neutral-100">
+							{currentBalance.toFixed(2)} <span className="text-sm font-normal text-neutral-500">RU</span>
+						</div>
+					</div>
+
+					<div>
+						<Label htmlFor="new-balance">New Balance (RU)</Label>
+						<Input
+							id="new-balance"
+							type="number"
+							step="0.01"
+							min="0"
+							value={balance}
+							onChange={(e) => setBalance(parseFloat(e.target.value) || 0)}
+						/>
+					</div>
+
+					<div className="flex gap-2 flex-wrap">
+						<button
+							type="button"
+							onClick={() => handleQuickAdd(10)}
+							className="px-3 py-1 text-xs rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50"
+						>
+							+10 RU
+						</button>
+						<button
+							type="button"
+							onClick={() => handleQuickAdd(50)}
+							className="px-3 py-1 text-xs rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50"
+						>
+							+50 RU
+						</button>
+						<button
+							type="button"
+							onClick={() => handleQuickAdd(100)}
+							className="px-3 py-1 text-xs rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50"
+						>
+							+100 RU
+						</button>
+						<button
+							type="button"
+							onClick={() => handleQuickAdd(-10)}
+							className="px-3 py-1 text-xs rounded bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50"
+						>
+							-10 RU
+						</button>
+						<button
+							type="button"
+							onClick={() => setBalance(0)}
+							className="px-3 py-1 text-xs rounded bg-neutral-200 text-neutral-700 dark:bg-neutral-700 dark:text-neutral-300 hover:bg-neutral-300 dark:hover:bg-neutral-600"
+						>
+							Reset to 0
+						</button>
+					</div>
+
+					{balance !== currentBalance && (
+						<div className={cn(
+							'text-sm px-3 py-2 rounded',
+							balance > currentBalance 
+								? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+								: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+						)}>
+							{balance > currentBalance ? '+' : ''}{(balance - currentBalance).toFixed(2)} RU change
+						</div>
+					)}
+
+					<div>
+						<Label htmlFor="ru-reason">Reason (optional)</Label>
+						<Input
+							id="ru-reason"
+							value={reason}
+							onChange={(e) => setReason(e.target.value)}
+							placeholder="e.g., Promotional credit, refund, etc."
+						/>
+					</div>
+
+					<div className="flex justify-end gap-2 pt-2">
+						<Button type="button" variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+						<Button 
+							type="submit" 
+							variant="primary" 
+							size="sm" 
+							isLoading={loading}
+							disabled={balance === currentBalance}
+						>
+							Update Resource Units
+						</Button>
+					</div>
+				</form>
+			)}
 		</Modal>
 	)
 }

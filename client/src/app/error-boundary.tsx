@@ -35,13 +35,51 @@ export class ErrorBoundary extends React.Component<
       return this.props.fallback ? (
         this.props.fallback
       ) : (
-        <div className="bg-neutral-100 h-screen flex flex-col items-center justify-center min-h-[50vh] text-center p-6">
-          <h1 className="text-2xl font-semibold text-black">
-            Couldn't render this page.
-          </h1>
-          <p className="text-neutral-600 uppercase text-sm tracking-widest mt-2" style={{ fontFamily: 'Space Mono, sans-serif' }}>
-            Error: {this.state.error?.message || "An unexpected error occurred."}
-          </p>
+        <div className="bg-black h-screen flex flex-col items-center justify-center p-6">
+          <div className="max-w-lg w-full">
+            {/* Combined error box */}
+            <div className="bg-neutral-900/50 border border-neutral-800/50 p-6 items-center text-center">
+              <h1 className="text-6xl md:text-8xl text-red-500 mb-6 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
+                ERROR
+              </h1>
+              
+              <div className="space-y-3">
+                <div>
+                  <span className="text-[10px] text-neutral-600 tracking-[0.2em] uppercase block mb-1" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    Message
+                  </span>
+                  <p className="text-sm text-neutral-300" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    {this.state.error?.message || "An unexpected error occurred"}
+                  </p>
+                </div>
+                
+                <div>
+                  <span className="text-[10px] text-neutral-600 tracking-[0.2em] uppercase block mb-1" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    Route
+                  </span>
+                  <p className="text-sm text-neutral-300" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    {window.location.pathname}
+                  </p>
+                </div>
+              </div>
+              
+              {/* Reset button */}
+              <button
+                onClick={this.handleReset}
+                className="mt-6 w-full bg-neutral-800/70 border border-neutral-700 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100 hover:border-red-500/50 transition-colors"
+                style={{ fontFamily: "'Space Mono', monospace" }}
+              >
+                RELOAD
+              </button>
+              <button
+                onClick={() => window.history.back()}
+                className="mt-6 w-full bg-neutral-800/70 border border-neutral-700 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100 hover:border-red-500/50 transition-colors"
+                style={{ fontFamily: "'Space Mono', monospace" }}
+              >
+                BACK
+              </button>
+            </div>
+          </div>
         </div>
       )
     }

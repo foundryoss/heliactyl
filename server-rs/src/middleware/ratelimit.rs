@@ -43,6 +43,12 @@ pub async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
+    // Skip rate limiting for daemon/lightd routes (they use API key auth)
+    let path = req.uri().path();
+    if path.starts_with("/api/lightd/") {
+        return next.run(req).await;
+    }
+
     // Extract IP from connection info or headers
     let ip = req
         .extensions()

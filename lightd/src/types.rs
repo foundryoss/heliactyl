@@ -8,6 +8,7 @@ use crate::{
     state_manager::StateManager, 
     monitoring::ResourceMonitor,
     websocket::TokenManager,
+    services::PowerActionService,
 };
 
 #[derive(Clone)]
@@ -20,4 +21,5 @@ pub struct AppState {
     pub state_manager: Arc<Mutex<StateManager>>,
     pub resource_monitor: Option<Arc<ResourceMonitor>>,
     pub websocket_tokens: Arc<TokenManager>,
+    pub power_actions: Arc<PowerActionService>,
 }

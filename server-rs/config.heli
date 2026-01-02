@@ -1,6 +1,7 @@
 {
     node = {Heli-dev},
     key = {977540a5-f2c9-491d-bccc-6525072d7921},
+    lightd_api_key = {lightd-secret-key-2024-ru-deduct},
     max_tenats = {10},
     server = {
         host = {0.0.0.0},
@@ -8,7 +9,7 @@
     },
     daemon = {
         host = {localhost},
-        port = {8083},
+        port = {8087},
         api_key = {pkg-lat-daemon-token-2024}
     },
     uptime = {

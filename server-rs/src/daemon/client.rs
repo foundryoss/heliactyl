@@ -339,6 +339,99 @@ impl DaemonClient {
             price_per_month: data["price_per_month"].as_f64().unwrap_or(0.0),
         })
     }
+
+    /// Get container logs by UUID
+    pub async fn get_container_logs(&self, uuid: &str, tail: Option<&str>) -> Result<String, String> {
+        // First, resolve UUID to Docker container ID
+        let container = self.get_container(uuid).await?;
+        let docker_id = container.container_id;
+        
+        if docker_id.is_empty() {
+            return Err("Container has no Docker ID".to_string());
+        }
+        
+        let url = format!("{}/containers/{}/logs", self.base_url, docker_id);
+        
+        let body = serde_json::json!({
+            "follow": false,
+            "tail": tail.unwrap_or("50")
+        });
+        
+        tracing::debug!("Getting logs for container: {} (docker_id: {})", uuid, docker_id);
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to get logs: {}", error_text));
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        
+        let success = json["success"].as_bool().unwrap_or(false);
+        if !success {
+            let msg = json["message"].as_str().unwrap_or("Unknown error");
+            return Err(msg.to_string());
+        }
+        
+        let logs = json["data"].as_str().unwrap_or("").to_string();
+        Ok(logs)
+    }
+
+    /// Get RU summary for all containers from daemon
+    pub async fn get_ru_summary(&self) -> Result<HashMap<String, f64>, String> {
+        let url = format!("{}/monitoring/ru/summary", self.base_url);
+        
+        let response = self.client.get(&url).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err("Failed to get RU summary".to_string());
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        
+        let data = json.get("data").ok_or("No data in response")?;
+        
+        let mut summary = HashMap::new();
+        if let Some(obj) = data.as_object() {
+            for (container_id, ru_value) in obj {
+                if let Some(ru) = ru_value.as_f64() {
+                    summary.insert(container_id.clone(), ru);
+                }
+            }
+        }
+        
+        Ok(summary)
+    }
+
+    /// Get container metrics from daemon
+    pub async fn get_container_metrics(&self, container_id: &str) -> Result<ContainerMetrics, String> {
+        let url = format!("{}/monitoring/containers/{}", self.base_url, container_id);
+        
+        let response = self.client.get(&url).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err("Failed to get container metrics".to_string());
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        
+        let data = json.get("data").ok_or("No data in response")?;
+        
+        Ok(ContainerMetrics {
+            container_id: data["container_id"].as_str().unwrap_or("").to_string(),
+            cpu_percent: data["cpu_percent"].as_f64().unwrap_or(0.0),
+            memory_usage_bytes: data["memory_usage_bytes"].as_u64().unwrap_or(0),
+            memory_percent: data["memory_percent"].as_f64().unwrap_or(0.0),
+            is_running: data["is_running"].as_bool().unwrap_or(false),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -360,4 +453,13 @@ pub struct RUEstimate {
     pub price_per_hour: f64,
     pub price_per_day: f64,
     pub price_per_month: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ContainerMetrics {
+    pub container_id: String,
+    pub cpu_percent: f64,
+    pub memory_usage_bytes: u64,
+    pub memory_percent: f64,
+    pub is_running: bool,
 }

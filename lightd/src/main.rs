@@ -26,12 +26,14 @@ mod container_tracker;
 mod state_manager;
 mod monitoring;
 mod websocket;
+mod services;
 
 use container_tracker::ContainerTrackingManager;
 use state_manager::StateManager;
 use config::Config;
 use docker::{DockerClient, NetworkManager};
 use types::AppState;
+use services::PowerActionService;
 
 async fn perform_daemon_recovery(docker: &DockerClient, state_manager: &mut StateManager) -> anyhow::Result<()> {
     info!("Starting daemon recovery process...");
@@ -409,7 +411,16 @@ async fn start_daemon() -> anyhow::Result<()> {
             Arc::clone(&state_manager_arc),
             ru_config,
             monitoring_config.interval_ms,
-        ));
+        ).with_remote(monitoring_config.remote.clone()));
+        
+        // Log remote config status
+        if let Some(ref remote) = monitoring_config.remote {
+            if remote.enabled {
+                info!("Remote panel RU posting enabled: {}", remote.url);
+            } else {
+                info!("Remote panel RU posting disabled");
+            }
+        }
         
         // Start monitoring in background
         let monitor_clone = monitor.clone();
@@ -418,6 +429,7 @@ async fn start_daemon() -> anyhow::Result<()> {
         });
         
         info!("Resource monitoring started with interval: {}ms", monitoring_config.interval_ms);
+        
         (Some(monitor), state_manager_arc)
     } else {
         info!("Resource monitoring is disabled");
@@ -433,15 +445,27 @@ async fn start_daemon() -> anyhow::Result<()> {
         token_manager_clone.start_cleanup_task().await;
     });
 
+    // Initialize PowerActionService for non-blocking container operations
+    let docker_arc = Arc::new(docker);
+    let container_tracker_arc = Arc::new(container_tracker);
+    let power_actions = Arc::new(PowerActionService::new(
+        Arc::new(docker_arc.client.clone()),
+        resource_monitor.1.clone(),
+        container_tracker_arc.clone(),
+    ));
+    
+    info!("Power action service initialized for non-blocking container operations");
+
     let state = AppState {
-        docker: Arc::new(docker),
+        docker: docker_arc,
         config: Arc::new(config.clone()),
         network: Arc::new(Mutex::new(network)),
         network_config: Arc::new(network_config.clone()),
-        container_tracker: Arc::new(container_tracker),
+        container_tracker: container_tracker_arc,
         state_manager: resource_monitor.1,
         resource_monitor: resource_monitor.0,
         websocket_tokens,
+        power_actions,
     };
 
     let app = Router::new()
@@ -452,6 +476,7 @@ async fn start_daemon() -> anyhow::Result<()> {
         .route("/containers/:id/start", post(handlers::container::start_container))
         .route("/containers/:id/stop", post(handlers::container::stop_container))
         .route("/containers/:id/kill", post(handlers::container::kill_container))
+        .route("/containers/:id/restart", post(handlers::container::restart_container))
         .route("/containers/:id/suspend", post(handlers::container::suspend_container))
         .route("/containers/:id/unsuspend", post(handlers::container::unsuspend_container))
         .route("/containers/:id/attach", post(handlers::container::attach_container))
@@ -462,11 +487,15 @@ async fn start_daemon() -> anyhow::Result<()> {
         .route("/containers/:id/update", post(handlers::container::update_container))
         .route("/containers/:id/limits", put(handlers::container::update_container_limits))
         .route("/containers/:id/status", get(handlers::container::get_container_status))
+        .route("/containers/:id/pending-action", get(handlers::container::get_container_pending_action))
         .route("/containers/uuid/:uuid", get(handlers::container::get_container_by_uuid))
         .route("/containers/uuid/:uuid/start", post(handlers::container::start_container_by_uuid))
         .route("/containers/uuid/:uuid/stop", post(handlers::container::stop_container_by_uuid))
+        .route("/containers/uuid/:uuid/restart", post(handlers::container::restart_container_by_uuid))
         .route("/containers/uuid/:uuid/suspend", post(handlers::container::suspend_container_by_uuid))
         .route("/containers/uuid/:uuid/unsuspend", post(handlers::container::unsuspend_container_by_uuid))
+        // Power action status
+        .route("/power-actions/:action_id", get(handlers::container::get_power_action_status))
         // WebSocket routes
         .route("/websocket/generate", get(handlers::websocket::generate_websocket_token))
         .route("/websocket", get(handlers::websocket::websocket_handler))

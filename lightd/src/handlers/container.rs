@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{
     docker::ContainerManager,
@@ -87,7 +87,7 @@ pub async fn create_container(
         error!("Failed to add container to daemon state: {}", e);
     }
     
-    let manager = ContainerManager::new(state.docker.client());
+    let manager = ContainerManager::new(state.docker.client().clone());
     let volumes_path = &state.config.storage.volumes_path;
     
     // Always use entrypoint.sh as the container command
@@ -197,7 +197,7 @@ pub async fn create_container(
                     }
                     
                     // Wait for container to exit (install script finished)
-                    let docker = bg_state.docker.client();
+                    let docker = bg_state.docker.client().clone();
                     loop {
                         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                         
@@ -214,7 +214,7 @@ pub async fn create_container(
                                             }
                                             
                                             // Restart container with new entrypoint
-                                            let manager = ContainerManager::new(docker);
+                                            let manager = ContainerManager::new(docker.clone());
                                             if let Err(e) = manager.start(&bg_container_id).await {
                                                 error!("Failed to restart container: {}", e);
                                             }
@@ -299,170 +299,270 @@ pub async fn list_containers(
     }
 }
 
-/// Start a container
+/// Start a container (fire-and-forget, truly non-blocking)
 pub async fn start_container(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    info!("Starting container: {}", id);
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("Received start request for container: {}", id);
     
-    // Check if container is suspended
-    match check_container_suspended(&state, &id).await {
-        Ok(true) => {
-            return Ok(Json(ApiResponse::error("Cannot start suspended container. Unsuspend it first.".to_string())));
-        }
-        Ok(false) => {}, // Not suspended, continue
-        Err(e) => {
-            return Ok(Json(ApiResponse::error(e)));
-        }
+    // Quick check for suspended state (with timeout to avoid blocking)
+    let is_suspended = match tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        check_container_suspended(&state, &id)
+    ).await {
+        Ok(Ok(true)) => true,
+        _ => false,
+    };
+    
+    if is_suspended {
+        return Ok(Json(ApiResponse::error("Cannot start suspended container. Unsuspend it first.".to_string())));
     }
     
-    let manager = ContainerManager::new(state.docker.client());
-    match manager.start(&id).await {
-        Ok(_) => {
-            // Update daemon state - find container by ID and update status
-            let state_manager = state.state_manager.lock().await;
-            if let Some((uuid, _)) = state_manager.find_by_container_id(&id) {
-                let uuid = uuid.clone();
-                drop(state_manager); // Release lock before async operation
-                if let Err(e) = state.state_manager.lock().await.update_container_state(&uuid, "running").await {
-                    error!("Failed to update container state in daemon state: {}", e);
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let docker = state.docker.client().clone();
+    let state_manager = state.state_manager.clone();
+    let container_tracker = state.container_tracker.clone();
+    let container_id = id.clone();
+    
+    tokio::spawn(async move {
+        info!("Background: Starting start operation for container {}", container_id);
+        
+        let uuid = match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state_manager.lock()
+        ).await {
+            Ok(guard) => {
+                if let Some((uuid, _)) = guard.find_by_container_id(&container_id) {
+                    uuid.clone()
+                } else {
+                    container_id.clone()
                 }
             }
-            
-            // Update container tracker status - find by container ID first
-            if let Ok(Some(tracker)) = state.container_tracker.find_by_container_id(&id).await {
-                if let Err(e) = state.container_tracker.update_container_status(&tracker.custom_uuid, "running").await {
-                    error!("Failed to update container tracker status: {}", e);
+            Err(_) => container_id.clone(),
+        };
+        
+        let manager = ContainerManager::new(docker);
+        match manager.start(&container_id).await {
+            Ok(_) => {
+                info!("Background: Container {} started successfully", container_id);
+                if let Ok(mut guard) = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    state_manager.lock()
+                ).await {
+                    let _ = guard.update_container_state(&uuid, "running").await;
                 }
+                let _ = container_tracker.update_container_status(&uuid, "running").await;
             }
-            
-            Ok(Json(ApiResponse::success(format!("Container {} started", id))))
+            Err(e) => {
+                error!("Background: Failed to start container {}: {}", container_id, e);
+            }
         }
-        Err(e) => {
-            error!("Failed to start container {}: {}", id, e);
-            Ok(Json(ApiResponse::error(e.to_string())))
-        }
-    }
+    });
+    
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "status": "accepted",
+        "action_id": action_id,
+        "message": format!("Start action initiated for container {}", id),
+        "note": "Operation is running in background"
+    }))))
 }
 
-/// Stop a container
+/// Stop a container (fire-and-forget, truly non-blocking)
 pub async fn stop_container(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    info!("Stopping container: {}", id);
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("Received stop request for container: {}", id);
     
-    let manager = ContainerManager::new(state.docker.client());
-    match manager.stop(&id).await {
-        Ok(_) => {
-            // Update daemon state
-            let state_manager = state.state_manager.lock().await;
-            if let Some((uuid, _)) = state_manager.find_by_container_id(&id) {
-                let uuid = uuid.clone();
-                drop(state_manager);
-                if let Err(e) = state.state_manager.lock().await.update_container_state(&uuid, "stopped").await {
-                    error!("Failed to update container state in daemon state: {}", e);
+    // Generate action ID immediately
+    let action_id = uuid::Uuid::new_v4().to_string();
+    
+    // Clone what we need for the background task
+    let docker = state.docker.client().clone();
+    let state_manager = state.state_manager.clone();
+    let container_tracker = state.container_tracker.clone();
+    let container_id = id.clone();
+    
+    // Spawn a completely detached background task
+    tokio::spawn(async move {
+        info!("Background: Starting stop operation for container {}", container_id);
+        
+        // Try to get UUID (non-blocking if we can't get lock quickly)
+        let uuid = match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state_manager.lock()
+        ).await {
+            Ok(guard) => {
+                if let Some((uuid, _)) = guard.find_by_container_id(&container_id) {
+                    uuid.clone()
+                } else {
+                    container_id.clone()
                 }
             }
-            
-            // Update container tracker status
-            if let Ok(Some(tracker)) = state.container_tracker.find_by_container_id(&id).await {
-                if let Err(e) = state.container_tracker.update_container_status(&tracker.custom_uuid, "stopped").await {
-                    error!("Failed to update container tracker status: {}", e);
+            Err(_) => container_id.clone(), // Couldn't get lock, use container_id as fallback
+        };
+        
+        // Execute the stop with force-kill fallback
+        let manager = ContainerManager::new(docker);
+        let result = manager.stop(&container_id).await;
+        
+        match result {
+            Ok(_) => {
+                info!("Background: Container {} stopped successfully", container_id);
+                
+                // Update state (don't block on this)
+                if let Ok(mut guard) = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    state_manager.lock()
+                ).await {
+                    let _ = guard.update_container_state(&uuid, "stopped").await;
                 }
+                
+                // Update tracker (fire and forget)
+                let _ = container_tracker.update_container_status(&uuid, "stopped").await;
             }
-            
-            Ok(Json(ApiResponse::success(format!("Container {} stopped", id))))
+            Err(e) => {
+                error!("Background: Failed to stop container {}: {}", container_id, e);
+            }
         }
-        Err(e) => {
-            error!("Failed to stop container {}: {}", id, e);
-            Ok(Json(ApiResponse::error(e.to_string())))
-        }
-    }
+    });
+    
+    // Return immediately - don't wait for Docker at all
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "status": "accepted",
+        "action_id": action_id,
+        "message": format!("Stop action initiated for container {}", id),
+        "note": "Operation is running in background"
+    }))))
 }
 
-/// Kill a container
+/// Kill a container (fire-and-forget, truly non-blocking)
 pub async fn kill_container(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    info!("Killing container: {}", id);
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("Received kill request for container: {}", id);
     
-    let manager = ContainerManager::new(state.docker.client());
-    match manager.kill(&id).await {
-        Ok(_) => {
-            // Update daemon state
-            let state_manager = state.state_manager.lock().await;
-            if let Some((uuid, _)) = state_manager.find_by_container_id(&id) {
-                let uuid = uuid.clone();
-                drop(state_manager);
-                if let Err(e) = state.state_manager.lock().await.update_container_state(&uuid, "killed").await {
-                    error!("Failed to update container state in daemon state: {}", e);
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let docker = state.docker.client().clone();
+    let state_manager = state.state_manager.clone();
+    let container_tracker = state.container_tracker.clone();
+    let container_id = id.clone();
+    
+    tokio::spawn(async move {
+        info!("Background: Starting kill operation for container {}", container_id);
+        
+        let uuid = match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state_manager.lock()
+        ).await {
+            Ok(guard) => {
+                if let Some((uuid, _)) = guard.find_by_container_id(&container_id) {
+                    uuid.clone()
+                } else {
+                    container_id.clone()
                 }
             }
-            
-            // Update container tracker status
-            if let Ok(Some(tracker)) = state.container_tracker.find_by_container_id(&id).await {
-                if let Err(e) = state.container_tracker.update_container_status(&tracker.custom_uuid, "killed").await {
-                    error!("Failed to update container tracker status: {}", e);
+            Err(_) => container_id.clone(),
+        };
+        
+        let manager = ContainerManager::new(docker);
+        match manager.kill(&container_id).await {
+            Ok(_) => {
+                info!("Background: Container {} killed successfully", container_id);
+                if let Ok(mut guard) = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    state_manager.lock()
+                ).await {
+                    let _ = guard.update_container_state(&uuid, "killed").await;
                 }
+                let _ = container_tracker.update_container_status(&uuid, "killed").await;
             }
-            
-            Ok(Json(ApiResponse::success(format!("Container {} killed", id))))
+            Err(e) => {
+                error!("Background: Failed to kill container {}: {}", container_id, e);
+            }
         }
-        Err(e) => {
-            error!("Failed to kill container {}: {}", id, e);
-            Ok(Json(ApiResponse::error(e.to_string())))
-        }
-    }
+    });
+    
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "status": "accepted",
+        "action_id": action_id,
+        "message": format!("Kill action initiated for container {}", id),
+        "note": "Operation is running in background"
+    }))))
 }
 
-/// Suspend a container (kill and lock completely)
+/// Suspend a container (fire-and-forget, truly non-blocking - kill and lock)
 pub async fn suspend_container(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SuspendRequest>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let reason = req.message.unwrap_or_else(|| "Container suspended by administrator".to_string());
-    info!("Suspending container: {} with reason: {}", id, reason);
+    info!("Received suspend request for container: {} with reason: {}", id, reason);
     
-    // Find container UUID first
-    let state_manager = state.state_manager.lock().await;
-    if let Some((uuid, _container_state)) = state_manager.find_by_container_id(&id) {
-        let uuid = uuid.clone();
-        drop(state_manager);
-        
-        // Check if already suspended
-        if state.state_manager.lock().await.is_container_suspended(&uuid) {
-            return Ok(Json(ApiResponse::error("Container is already suspended".to_string())));
+    // Quick check if already suspended (with timeout)
+    let (uuid, already_suspended) = match tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        state.state_manager.lock()
+    ).await {
+        Ok(guard) => {
+            if let Some((uuid, _)) = guard.find_by_container_id(&id) {
+                let is_suspended = guard.is_container_suspended(&uuid);
+                (Some(uuid.clone()), is_suspended)
+            } else {
+                (None, false)
+            }
         }
+        Err(_) => (None, false),
+    };
+    
+    if already_suspended {
+        return Ok(Json(ApiResponse::error("Container is already suspended".to_string())));
+    }
+    
+    let uuid = uuid.unwrap_or_else(|| id.clone());
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let docker = state.docker.client().clone();
+    let _state_manager = state.state_manager.clone();
+    let container_tracker = state.container_tracker.clone();
+    let container_id = id.clone();
+    let reason_clone = reason.clone();
+    
+    // Mark as suspended immediately (before kill completes)
+    if let Ok(mut guard) = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        state.state_manager.lock()
+    ).await {
+        let _ = guard.suspend_container(&uuid, &reason).await;
+    }
+    
+    tokio::spawn(async move {
+        info!("Background: Starting suspend operation for container {}", container_id);
         
-        let manager = ContainerManager::new(state.docker.client());
-        match manager.suspend(&id, Some(reason.clone())).await {
+        let manager = ContainerManager::new(docker);
+        match manager.suspend(&container_id, Some(reason_clone.clone())).await {
             Ok(_) => {
-                // Update daemon state to suspended
-                if let Err(e) = state.state_manager.lock().await.suspend_container(&uuid, &reason).await {
-                    error!("Failed to update container state to suspended: {}", e);
-                }
-                
-                // Update container tracker status
-                if let Ok(Some(tracker)) = state.container_tracker.find_by_container_id(&id).await {
-                    if let Err(e) = state.container_tracker.update_container_status(&tracker.custom_uuid, "suspended").await {
-                        error!("Failed to update container tracker status: {}", e);
-                    }
-                }
-                
-                Ok(Json(ApiResponse::success(format!("Container {} suspended: {}", id, reason))))
+                info!("Background: Container {} suspended successfully", container_id);
+                let _ = container_tracker.update_container_status(&uuid, "suspended").await;
             }
             Err(e) => {
-                error!("Failed to suspend container {}: {}", id, e);
-                Ok(Json(ApiResponse::error(e.to_string())))
+                warn!("Background: Suspend failed for {}, attempting force kill: {}", container_id, e);
+                // Force kill as fallback
+                let _ = manager.force_stop(&container_id).await;
+                let _ = container_tracker.update_container_status(&uuid, "suspended").await;
             }
         }
-    } else {
-        Ok(Json(ApiResponse::error("Container not found in daemon state".to_string())))
-    }
+    });
+    
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "status": "accepted",
+        "action_id": action_id,
+        "reason": reason,
+        "message": format!("Suspend action initiated for container {}", id),
+        "note": "Operation is running in background"
+    }))))
 }
 
 /// Unsuspend a container (remove suspension lock)
@@ -908,7 +1008,7 @@ pub async fn get_container_by_uuid(
 pub async fn start_container_by_uuid(
     State(state): State<AppState>,
     Path(uuid): Path<String>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!("Starting container by UUID: {}", uuid);
     
     match resolve_container_id(&state, &uuid).await {
@@ -921,7 +1021,7 @@ pub async fn start_container_by_uuid(
 pub async fn stop_container_by_uuid(
     State(state): State<AppState>,
     Path(uuid): Path<String>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!("Stopping container by UUID: {}", uuid);
     
     match resolve_container_id(&state, &uuid).await {
@@ -935,7 +1035,7 @@ pub async fn suspend_container_by_uuid(
     State(state): State<AppState>,
     Path(uuid): Path<String>,
     Json(req): Json<SuspendRequest>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!("Suspending container by UUID: {}", uuid);
     
     match resolve_container_id(&state, &uuid).await {
@@ -955,5 +1055,143 @@ pub async fn unsuspend_container_by_uuid(
     match resolve_container_id(&state, &uuid).await {
         Ok(container_id) => unsuspend_container(State(state), Path(container_id), Json(req)).await,
         Err(e) => Ok(Json(ApiResponse::error(e))),
+    }
+}
+
+/// Restart a container (fire-and-forget, truly non-blocking)
+pub async fn restart_container(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("Received restart request for container: {}", id);
+    
+    // Quick check for suspended state
+    let is_suspended = match tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        check_container_suspended(&state, &id)
+    ).await {
+        Ok(Ok(true)) => true,
+        _ => false,
+    };
+    
+    if is_suspended {
+        return Ok(Json(ApiResponse::error("Cannot restart suspended container. Unsuspend it first.".to_string())));
+    }
+    
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let docker = state.docker.client().clone();
+    let state_manager = state.state_manager.clone();
+    let container_tracker = state.container_tracker.clone();
+    let container_id = id.clone();
+    
+    tokio::spawn(async move {
+        info!("Background: Starting restart operation for container {}", container_id);
+        
+        let uuid = match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state_manager.lock()
+        ).await {
+            Ok(guard) => {
+                if let Some((uuid, _)) = guard.find_by_container_id(&container_id) {
+                    uuid.clone()
+                } else {
+                    container_id.clone()
+                }
+            }
+            Err(_) => container_id.clone(),
+        };
+        
+        let manager = ContainerManager::new(docker);
+        
+        // Stop first
+        info!("Background: Stopping container {} for restart", container_id);
+        let _ = manager.stop(&container_id).await;
+        
+        // Brief delay to ensure container is fully stopped
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        
+        // Then start
+        info!("Background: Starting container {} for restart", container_id);
+        match manager.start(&container_id).await {
+            Ok(_) => {
+                info!("Background: Container {} restarted successfully", container_id);
+                if let Ok(mut guard) = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    state_manager.lock()
+                ).await {
+                    let _ = guard.update_container_state(&uuid, "running").await;
+                }
+                let _ = container_tracker.update_container_status(&uuid, "running").await;
+            }
+            Err(e) => {
+                error!("Background: Failed to restart container {}: {}", container_id, e);
+            }
+        }
+    });
+    
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "status": "accepted",
+        "action_id": action_id,
+        "message": format!("Restart action initiated for container {}", id),
+        "note": "Operation is running in background"
+    }))))
+}
+
+/// Restart a container by UUID
+pub async fn restart_container_by_uuid(
+    State(state): State<AppState>,
+    Path(uuid): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("Restarting container by UUID: {}", uuid);
+    
+    match resolve_container_id(&state, &uuid).await {
+        Ok(container_id) => restart_container(State(state), Path(container_id)).await,
+        Err(e) => Ok(Json(ApiResponse::error(e))),
+    }
+}
+
+/// Get power action status by action ID
+pub async fn get_power_action_status(
+    State(state): State<AppState>,
+    Path(action_id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    match state.power_actions.get_action_status(&action_id).await {
+        Some(result) => {
+            Ok(Json(ApiResponse::success(serde_json::json!({
+                "action_id": result.action_id,
+                "container_id": result.container_id,
+                "container_uuid": result.container_uuid,
+                "action": format!("{}", result.action),
+                "status": result.status,
+                "message": result.message,
+                "started_at": result.started_at.to_rfc3339(),
+                "completed_at": result.completed_at.map(|t| t.to_rfc3339()),
+            }))))
+        }
+        None => {
+            Ok(Json(ApiResponse::error(format!("Action {} not found", action_id))))
+        }
+    }
+}
+
+/// Check if a container has a pending power action
+pub async fn get_container_pending_action(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    match state.power_actions.has_pending_action(&id).await {
+        Some(action_id) => {
+            let status = state.power_actions.get_action_status(&action_id).await;
+            Ok(Json(ApiResponse::success(serde_json::json!({
+                "has_pending_action": true,
+                "action_id": action_id,
+                "status": status.map(|s| format!("{:?}", s.status)),
+            }))))
+        }
+        None => {
+            Ok(Json(ApiResponse::success(serde_json::json!({
+                "has_pending_action": false,
+            }))))
+        }
     }
 }

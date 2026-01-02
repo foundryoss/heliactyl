@@ -7,6 +7,14 @@ pub struct HeliConfig {
     data: Value,
 }
 
+impl Clone for HeliConfig {
+    fn clone(&self) -> Self {
+        HeliConfig {
+            data: self.data.clone(),
+        }
+    }
+}
+
 impl HeliConfig {
     /// Parse a .heli configuration file
     pub fn parse(file_path: &str) -> Result<Self, Box<dyn std::error::Error>> {

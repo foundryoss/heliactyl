@@ -1,0 +1,37 @@
+{
+  "name": "Docker VM",
+  "icon_url": "https://upload.wikimedia.org/wikipedia/commons/2/2c/Alpine_Linux_logo.png",
+  "docker_images": {
+    "node_18": "alpine:latest"
+  },
+  "startup_cmd": "echo Welcome to Your new VM",
+  "install_content": "echo Installing Node.js ",
+  "update_content": "npm install -g npm \nnpm install typescript ts-node @types/node",
+  "runtime": {
+    "file-init": "printf \"export const app = {\\n  address: \\\"%s\\\",\\n  port: %s,\\n  host: \\\"%s\\\",\\n};\\n\" \\\n\"${SERVER_ADDRESS:-0.0.0.0}\" \\\n\"${SERVER_PORT:-3000}\" \\\n\"${SERVER_HOST:-localhost}\" > app.ts",
+    "start-up": "Node.js app started.",
+    "stop": "^^C"
+  },
+  "variables": [
+    {
+      "name": "File to run",
+      "description": "",
+      "env_variable": "FILE_TO_RUN",
+      "default_value": "app.ts",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string",
+      "field_type": "text"
+    },
+    {
+      "name": "File to not run",
+      "description": "",
+      "env_variable": "FILE_TO_NOT_RUN",
+      "default_value": "app.tsx",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string",
+      "field_type": "text"
+    }
+  ]
+}

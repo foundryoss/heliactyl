@@ -90,4 +90,6 @@ Cargo.lock
 server-rs/config.heli
 
 wings
-#skyportd
+skyportd
+docs
+docs/

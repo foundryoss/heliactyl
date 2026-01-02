@@ -42,6 +42,7 @@ pub struct MonitoringConfig {
     pub enabled: bool,
     pub interval_ms: u64,
     pub ru_config: RUConfigSettings,
+    pub remote: Option<RemoteConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,12 +55,21 @@ pub struct RUConfigSettings {
     pub base_ru: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    pub url: String,
+    pub secret: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 impl Default for MonitoringConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             interval_ms: 1000,
             ru_config: RUConfigSettings::default(),
+            remote: None,
         }
     }
 }
@@ -73,6 +83,16 @@ impl Default for RUConfigSettings {
             network_weight: 1.5,
             storage_weight: 0.8,
             base_ru: 0.1,
+        }
+    }
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://localhost:8787".to_string(),
+            secret: "change-me-secret".to_string(),
+            enabled: false,
         }
     }
 }

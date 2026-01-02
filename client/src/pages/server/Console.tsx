@@ -3,123 +3,61 @@ import { useAuth } from '@/providers/AuthProvider'
 import { useApi } from '@/api/client'
 import { useTenants } from '@/providers/TenantProvider'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import Spinner from '@/components/ui/Spinner'
 import { useAlert } from '@/components/ui/Alert'
-import { 
-    PlayIcon, 
-    StopIcon, 
-    ArrowPathIcon,
-    XMarkIcon,
-    ExclamationTriangleIcon,
-    ArrowUpRightIcon,
-    CommandLineIcon
-} from '@heroicons/react/24/outline'
-import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import { WebLinksAddon } from '@xterm/addon-web-links'
-import '../../xterm.css'
+import { ArrowLeftIcon } from '@heroicons/react/24/outline'
+
+interface LogLine {
+    id: number
+    text: string
+    type: 'stdout' | 'info' | 'error' | 'success' | 'status'
+    timestamp: Date
+}
 
 interface ServerStats {
     memory_bytes: number
     memory_limit_bytes: number
     cpu_absolute: number
-    network: {
-        rx_bytes: number
-        tx_bytes: number
-    }
+    network: { rx_bytes: number; tx_bytes: number }
     state: string
     disk_bytes: number
 }
 
-interface ServerResources {
-    memory: number
-    swap: number
-    disk: number
-    io: number
-    cpu: number
-}
-
-// ANSI escape code parser for fallback terminal
-function parseAnsiToHtml(text: string): string {
-    // ANSI color map
-    const colors: Record<number, string> = {
-        30: '#000000', // black
-        31: '#ff5555', // red
-        32: '#50fa7b', // green
-        33: '#f1fa8c', // yellow
-        34: '#bd93f9', // blue
-        35: '#ff79c6', // magenta
-        36: '#8be9fd', // cyan
-        37: '#f8f8f2', // white
-        90: '#6272a4', // bright black (gray)
-        91: '#ff6e67', // bright red
-        92: '#5af78e', // bright green
-        93: '#f4f99d', // bright yellow
-        94: '#caa9fa', // bright blue
-        95: '#ff92d0', // bright magenta
-        96: '#9aedfe', // bright cyan
-        97: '#ffffff'  // bright white
-    }
-
-    let html = ''
-    let currentColor = '#ffffff'
-    let isBold = false
-    let isUnderline = false
+// Resource bar component (same as Dashboard)
+function ResourceBar({ label, used, total, unit }: { label: string; used: number; total: number; unit: string }) {
+    const percent = total > 0 ? Math.round((used / total) * 100) : 0
+    const barSegments = 10
+    const filledSegments = Math.round((percent / 100) * barSegments)
     
-    // Split by escape sequences
-    const parts = text.split(/\x1b\[([0-9;]*[a-zA-Z])/)
-    
-    for (let i = 0; i < parts.length; i++) {
-        if (i % 2 === 0) {
-            // Regular text
-            if (parts[i]) {
-                const escapedText = parts[i]
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&#39;')
-                
-                const style = `color: ${currentColor}; ${isBold ? 'font-weight: bold;' : ''} ${isUnderline ? 'text-decoration: underline;' : ''}`
-                html += `<span style="${style}">${escapedText}</span>`
-            }
-        } else {
-            // ANSI escape sequence
-            const sequence = parts[i]
-            if (sequence) {
-                const codes = sequence.slice(0, -1).split(';').map(Number).filter(code => !isNaN(code))
-                
-                for (const code of codes) {
-                    if (code === 0) {
-                        // Reset
-                        currentColor = '#ffffff'
-                        isBold = false
-                        isUnderline = false
-                    } else if (code === 1) {
-                        // Bold
-                        isBold = true
-                    } else if (code === 4) {
-                        // Underline
-                        isUnderline = true
-                    } else if (code === 22) {
-                        // Bold off
-                        isBold = false
-                    } else if (code === 24) {
-                        // Underline off
-                        isUnderline = false
-                    } else if (colors[code]) {
-                        // Color code
-                        currentColor = colors[code]
+    return (
+        <div className="space-y-1">
+            <div className="flex items-center justify-between">
+                <span className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    {label}
+                </span>
+                <span className="text-[10px] text-neutral-700 dark:text-neutral-400" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    {used.toFixed(0)}{unit}
+                </span>
+            </div>
+            <div className="flex gap-[1px]">
+                {Array.from({ length: barSegments }).map((_, i) => {
+                    const isFilled = i < filledSegments
+                    const segmentPercent = (i / barSegments) * 100
+                    let color = 'bg-neutral-300 dark:bg-neutral-800'
+                    if (isFilled) {
+                        if (segmentPercent < 33) color = 'bg-yellow-500'
+                        else if (segmentPercent < 66) color = 'bg-orange-500'
+                        else color = 'bg-red-500'
                     }
-                }
-            }
-        }
-    }
-    
-    return html || text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                    return (
+                        <div key={i} className={`h-2 flex-1 ${color} ${isFilled ? 'opacity-100' : 'opacity-30'}`} />
+                    )
+                })}
+            </div>
+        </div>
+    )
 }
 
 export function ConsolePage() {
@@ -135,110 +73,43 @@ export function ConsolePage() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [connected, setConnected] = useState(false)
-    const [serverStatus, setServerStatus] = useState<string>('unknown')
+    const [connecting, setConnecting] = useState(false)
+    const [serverStatus, setServerStatus] = useState<string>('offline')
     const [stats, setStats] = useState<ServerStats | null>(null)
-    const [resources, setResources] = useState<ServerResources | null>(null)
+    const [logs, setLogs] = useState<LogLine[]>([])
     const [command, setCommand] = useState('')
     const [commandHistory, setCommandHistory] = useState<string[]>([])
     const [historyIndex, setHistoryIndex] = useState(-1)
-    const [hasLogs, setHasLogs] = useState(false)
-    const [connectionFailed, setConnectionFailed] = useState(false)
+    const [powerLoading, setPowerLoading] = useState<string | null>(null)
 
     const wsRef = useRef<WebSocket | null>(null)
-    const terminalRef = useRef<HTMLDivElement>(null)
-    const terminalInstanceRef = useRef<Terminal | null>(null)
-    const fitAddonRef = useRef<FitAddon | null>(null)
+    const logContainerRef = useRef<HTMLDivElement>(null)
+    const logIdRef = useRef(0)
     const commandInputRef = useRef<HTMLInputElement>(null)
-    const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
-    const tokenExpiryTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
-    const initializeTerminal = useCallback(() => {
-        if (!terminalRef.current) return
-
-        try {
-            const terminal = new Terminal({
-                fontFamily: '"Space Mono", "SF Mono", Monaco, Inconsolata, "Fira Code", "Fira Mono", "Roboto Mono", monospace',
-                fontSize: 14,
-                fontWeight: '400',
-                lineHeight: 1.2,
-                letterSpacing: 0,
-                theme: {
-                    background: '#000000',
-                    foreground: '#ffffff',
-                    cursor: '#ffffff',
-                    black: '#000000',
-                    red: '#ff5555',
-                    green: '#50fa7b',
-                    yellow: '#f1fa8c',
-                    blue: '#bd93f9',
-                    magenta: '#ff79c6',
-                    cyan: '#8be9fd',
-                    white: '#bfbfbf',
-                    brightBlack: '#4d4d4d',
-                    brightRed: '#ff6e67',
-                    brightGreen: '#5af78e',
-                    brightYellow: '#f4f99d',
-                    brightBlue: '#caa9fa',
-                    brightMagenta: '#ff92d0',
-                    brightCyan: '#9aedfe',
-                    brightWhite: '#e6e6e6'
-                },
-                cursorBlink: false,
-                disableStdin: true,
-                convertEol: true,
-                scrollback: 1000,
-                allowProposedApi: true
-            })
-
-            const fitAddon = new FitAddon()
-            const webLinksAddon = new WebLinksAddon()
-            
-            terminal.loadAddon(fitAddon)
-            terminal.loadAddon(webLinksAddon)
-            terminal.open(terminalRef.current)
-            
-            setTimeout(() => {
-                fitAddon.fit()
-            }, 100)
-
-            terminalInstanceRef.current = terminal
-            fitAddonRef.current = fitAddon
-
-            const resizeObserver = new ResizeObserver(() => {
-                try {
-                    fitAddon.fit()
-                } catch (e) {
-                    // Ignore resize errors
-                }
-            })
-            resizeObserver.observe(terminalRef.current)
-
-            return () => {
-                resizeObserver.disconnect()
-                terminal.dispose()
+    const addLog = useCallback((text: string, type: LogLine['type'] = 'stdout') => {
+        setLogs(prev => {
+            const newLog: LogLine = {
+                id: logIdRef.current++,
+                text,
+                type,
+                timestamp: new Date()
             }
-        } catch (error) {
-            // Silent fallback
-            setConnectionFailed(true)
-        }
+            const updated = [...prev, newLog]
+            return updated.slice(-500)
+        })
     }, [])
 
-    const addConsoleOutput = useCallback((text: string) => {
-        setHasLogs(true)
-        
-        if (terminalInstanceRef.current) {
-            terminalInstanceRef.current.writeln(text)
-        } else if (terminalRef.current) {
-            const logLine = document.createElement('div')
-            logLine.style.fontFamily = '"Space Mono", monospace'
-            logLine.style.fontSize = '14px'
-            logLine.style.marginBottom = '2px'
-            logLine.style.whiteSpace = 'pre-wrap'
-            logLine.innerHTML = parseAnsiToHtml(text)
-            
-            terminalRef.current.appendChild(logLine)
-            terminalRef.current.scrollTop = terminalRef.current.scrollHeight
-        }
+    const formatTimestamp = useCallback((date: Date) => {
+        return date.toLocaleTimeString('en-US', { hour12: false })
+    }, [])
+
+    const formatBytes = useCallback((bytes: number) => {
+        if (bytes === 0) return 0
+        const k = 1024
+        const sizes = ['B', 'KB', 'MB', 'GB']
+        const i = Math.floor(Math.log(bytes) / Math.log(k))
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1))
     }, [])
 
     const loadServer = useCallback(async () => {
@@ -256,13 +127,7 @@ export function ConsolePage() {
             }
             
             setServer(foundServer)
-            setResources({
-                memory: foundServer.memoryMb,
-                swap: -1,
-                disk: foundServer.diskMb,
-                io: 500,
-                cpu: foundServer.cpuPercent
-            })
+            setServerStatus(foundServer.state || 'offline')
         } catch (e: any) {
             setError(e?.message || 'Failed to load server')
         } finally {
@@ -270,35 +135,23 @@ export function ConsolePage() {
         }
     }, [api, selectedTenantId, serverId])
 
-    const getWebSocketCredentials = useCallback(async () => {
-        if (!server) return null
-        
-        try {
-            const response = await api.servers.websocket(selectedTenantId!, server.id)
-            return response
-        } catch (e: any) {
-            setConnectionFailed(true)
-            return null
-        }
-    }, [api, selectedTenantId, server])
-
     const connectWebSocket = useCallback(async () => {
-        if (!server) return
+        if (!server || !selectedTenantId) return
 
-        const credentials = await getWebSocketCredentials()
-        if (!credentials) return
+        setConnecting(true)
+        addLog('Generating token...', 'info')
 
         try {
-            setConnectionFailed(false)
-
+            // Get WebSocket credentials from backend (which proxies to lightd)
+            const credentials = await api.servers.websocket(selectedTenantId, server.id)
+            
+            addLog('Connecting to console...', 'info')
+            
             const ws = new WebSocket(credentials.socket)
             wsRef.current = ws
 
             ws.onopen = () => {
-                ws.send(JSON.stringify({
-                    event: 'auth',
-                    args: [credentials.token]
-                }))
+                addLog('WebSocket connected, waiting for logs...', 'success')
             }
 
             ws.onmessage = (event) => {
@@ -306,81 +159,76 @@ export function ConsolePage() {
                     const data = JSON.parse(event.data)
                     
                     switch (data.event) {
-                        case 'auth success':
-                            setConnected(true)
-                            setConnectionFailed(false)
-                            ws.send(JSON.stringify({ event: 'send stats', args: [null] }))
-                            ws.send(JSON.stringify({ event: 'send logs', args: [null] }))
-                            break
-
-                        case 'status':
-                            setServerStatus(data.args[0])
-                            break
-
-                        case 'console output':
-                            addConsoleOutput(data.args[0])
-                            break
-
-                        case 'stats':
-                            try {
-                                const statsData = JSON.parse(data.args[0])
-                                setStats(statsData)
-                            } catch (e) {
-                                // Ignore stats parsing errors
+                        case 'init':
+                            // Init message: [container_id, container_uuid, status]
+                            if (data.args && data.args.length >= 3) {
+                                setConnected(true)
+                                setConnecting(false)
+                                setServerStatus(data.args[2])
+                                addLog(`Connected to container`, 'success')
                             }
                             break
-
-                        case 'token expiring':
-                            tokenExpiryTimeoutRef.current = setTimeout(async () => {
-                                const newCredentials = await getWebSocketCredentials()
-                                if (newCredentials && ws.readyState === WebSocket.OPEN) {
-                                    ws.send(JSON.stringify({
-                                        event: 'auth',
-                                        args: [newCredentials.token]
-                                    }))
-                                }
-                            }, 30000)
+                        case 'console_output':
+                            if (data.args && data.args[0]) {
+                                addLog(data.args[0], 'stdout')
+                            }
                             break
-
-                        case 'token expired':
-                            connectWebSocket()
+                        case 'status':
+                            if (data.args && data.args[0]) {
+                                setServerStatus(data.args[0])
+                                addLog(`Status: ${data.args[0]}`, 'status')
+                            }
                             break
+                        case 'stats':
+                            try {
+                                const statsData = typeof data.args[0] === 'string' 
+                                    ? JSON.parse(data.args[0]) 
+                                    : data.args[0]
+                                setStats(statsData)
+                            } catch {}
+                            break
+                        case 'daemon_message':
+                            if (data.args && data.args[0]) {
+                                addLog(`[daemon] ${data.args[0]}`, 'info')
+                            }
+                            break
+                        case 'error':
+                            if (data.args && data.args[0]) {
+                                addLog(`Error: ${data.args[0]}`, 'error')
+                            }
+                            break
+                        default:
+                            if (data.args && data.args.length > 0) {
+                                addLog(`[${data.event}] ${data.args.join(' ')}`, 'info')
+                            }
                     }
-                } catch (e) {
-                    // Ignore parsing errors
+                } catch {
+                    // Raw text message
+                    addLog(event.data, 'stdout')
                 }
             }
 
-            ws.onclose = () => {
+            ws.onclose = (event) => {
                 setConnected(false)
-                
-                if (ws === wsRef.current && !connectionFailed) {
-                    reconnectTimeoutRef.current = setTimeout(() => {
-                        connectWebSocket()
-                    }, 3000)
-                }
+                setConnecting(false)
+                addLog(`Disconnected (code: ${event.code})`, 'info')
             }
 
             ws.onerror = () => {
                 setConnected(false)
-                setConnectionFailed(true)
+                setConnecting(false)
+                addLog('Connection error', 'error')
             }
-
         } catch (e: any) {
-            setConnectionFailed(true)
+            setConnecting(false)
+            addLog(`Failed to connect: ${e?.message || 'Unknown error'}`, 'error')
         }
-    }, [server, getWebSocketCredentials, addConsoleOutput, connectionFailed])
+    }, [server, selectedTenantId, api, addLog])
 
     const disconnectWebSocket = useCallback(() => {
         if (wsRef.current) {
             wsRef.current.close()
             wsRef.current = null
-        }
-        if (reconnectTimeoutRef.current) {
-            clearTimeout(reconnectTimeoutRef.current)
-        }
-        if (tokenExpiryTimeoutRef.current) {
-            clearTimeout(tokenExpiryTimeoutRef.current)
         }
         setConnected(false)
     }, [])
@@ -389,64 +237,38 @@ export function ConsolePage() {
         if (!wsRef.current || !connected || !cmd.trim()) return
 
         const trimmedCmd = cmd.trim()
-        wsRef.current.send(JSON.stringify({
-            event: 'send command',
-            args: [trimmedCmd]
-        }))
+        wsRef.current.send(JSON.stringify({ event: 'send_command', args: [trimmedCmd] }))
+        addLog(`> ${trimmedCmd}`, 'info')
 
-        setCommandHistory(prev => {
-            const newHistory = [trimmedCmd, ...prev.filter(c => c !== trimmedCmd)]
-            return newHistory.slice(0, 50)
-        })
+        setCommandHistory(prev => [trimmedCmd, ...prev.filter(c => c !== trimmedCmd)].slice(0, 50))
         setHistoryIndex(-1)
         setCommand('')
-    }, [connected])
+    }, [connected, addLog])
 
     const sendPowerAction = useCallback(async (action: string) => {
-        const actionNames: Record<string, string> = {
-            start: 'Starting',
-            stop: 'Stopping', 
-            restart: 'Restarting',
-            kill: 'Force stopping'
-        }
-
-        // Try WebSocket first if connected
-        if (wsRef.current && connected) {
-            wsRef.current.send(JSON.stringify({
-                event: 'set state',
-                args: [action]
-            }))
-            notify({ description: `${actionNames[action] || action} server...`, type: 'success' })
-            return
-        }
-
-        // Fallback to HTTP API
         if (!selectedTenantId || !serverId) return
         
-        try {
-            notify({ description: `${actionNames[action] || action} server...`, type: 'success' })
-            
-            switch (action) {
-                case 'start':
-                    await api.servers.start(selectedTenantId, serverId)
-                    break
-                case 'stop':
-                    await api.servers.stop(selectedTenantId, serverId)
-                    break
-                case 'restart':
-                    await api.servers.restart(selectedTenantId, serverId)
-                    break
-                case 'kill':
-                    await api.servers.kill(selectedTenantId, serverId)
-                    break
-            }
-            
-            // Refresh server state after action
-            setTimeout(() => loadServer(), 1000)
-        } catch (e: any) {
-            notify({ description: e?.message || `Failed to ${action} server`, type: 'error' })
+        setPowerLoading(action)
+        const actionLabels: Record<string, string> = {
+            start: 'Starting', stop: 'Stopping', restart: 'Restarting', kill: 'Force stopping'
         }
-    }, [connected, api, selectedTenantId, serverId, notify, loadServer])
+        addLog(`${actionLabels[action] || action} server...`, 'info')
+
+        try {
+            switch (action) {
+                case 'start': await api.servers.start(selectedTenantId, serverId); break
+                case 'stop': await api.servers.stop(selectedTenantId, serverId); break
+                case 'restart': await api.servers.restart(selectedTenantId, serverId); break
+                case 'kill': await api.servers.kill(selectedTenantId, serverId); break
+            }
+            notify({ description: `${actionLabels[action]} server...`, type: 'success' })
+        } catch (e: any) {
+            addLog(`Failed to ${action}: ${e?.message}`, 'error')
+            notify({ description: e?.message || `Failed to ${action}`, type: 'error' })
+        } finally {
+            setPowerLoading(null)
+        }
+    }, [api, selectedTenantId, serverId, notify, addLog])
 
     const handleCommandSubmit = useCallback((e: React.FormEvent) => {
         e.preventDefault()
@@ -464,385 +286,272 @@ export function ConsolePage() {
         } else if (e.key === 'ArrowDown') {
             e.preventDefault()
             if (historyIndex > 0) {
-                const newIndex = historyIndex - 1
-                setHistoryIndex(newIndex)
-                setCommand(commandHistory[newIndex])
-            } else if (historyIndex === 0) {
+                setHistoryIndex(historyIndex - 1)
+                setCommand(commandHistory[historyIndex - 1])
+            } else {
                 setHistoryIndex(-1)
                 setCommand('')
             }
         }
     }, [historyIndex, commandHistory])
 
-    const formatBytes = useCallback((bytes: number) => {
-        if (bytes === 0) return '0 B'
-        const k = 1024
-        const sizes = ['B', 'KB', 'MB', 'GB']
-        const i = Math.floor(Math.log(bytes) / Math.log(k))
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
-    }, [])
-
-    const getStatusColor = useCallback((status: string) => {
-        switch (status.toLowerCase()) {
-            case 'running': return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-            case 'starting': return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-            case 'stopping': return 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200'
-            case 'offline': return 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200'
-            default: return 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200'
+    // Auto-scroll logs
+    useEffect(() => {
+        if (logContainerRef.current) {
+            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
         }
-    }, [])
+    }, [logs])
 
-    const getPowerButton = useCallback(() => {
-        const status = serverStatus || server?.state || 'unknown'
-        const isOffline = status === 'offline' || status === 'stopped' || status === 'exited'
-        const isStarting = status === 'starting' || status === 'installing'
-        const isStopping = status === 'stopping'
-        const isRunning = status === 'running' || status === 'ready'
-
-        if (isOffline || isStopping) {
-            return (
-                <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => sendPowerAction('start')}
-                    disabled={isStarting}
-                    className="text-green-600 hover:text-green-900 dark:text-green-400"
-                >
-                    <PlayIcon className="w-4 h-4" />
-                    Start
-                </Button>
-            )
-        }
-
-        return (
-            <>
-                <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => sendPowerAction('restart')}
-                    disabled={isOffline}
-                    className="text-orange-600 flex items-center gap-1 hover:text-orange-900 dark:text-orange-400"
-                >
-                    <ArrowPathIcon className="w-4 h-4" />
-                    Restart
-                </Button>
-                {isStopping ? (
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => sendPowerAction('kill')}
-                        className="text-red-600 flex items-center gap-1 hover:text-red-900 dark:text-red-400"
-                    >
-                        <XMarkIcon className="w-4 h-4" />
-                        Kill
-                    </Button>
-                ) : (
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => sendPowerAction('stop')}
-                        disabled={isOffline}
-                        className="text-red-600 flex items-center gap-1 hover:text-red-900 dark:text-red-400"
-                    >
-                        <StopIcon className="w-4 h-4" />
-                        Stop
-                    </Button>
-                )}
-            </>
-        )
-    }, [server, serverStatus, sendPowerAction])
-
+    useEffect(() => { loadServer() }, [loadServer])
+    
+    // Connect WebSocket when server is loaded
     useEffect(() => {
-        loadServer()
-    }, [loadServer])
-
-    useEffect(() => {
-        const cleanup = initializeTerminal()
-        return cleanup
-    }, [initializeTerminal])
-
-    useEffect(() => {
-        if (server) {
+        if (server && !connected && !connecting) {
             connectWebSocket()
         }
+        return () => disconnectWebSocket()
+    }, [server])
 
-        return () => {
-            disconnectWebSocket()
-        }
-    }, [server, connectWebSocket, disconnectWebSocket])
+    const isRunning = serverStatus === 'running' || serverStatus === 'ready'
+    const isOffline = serverStatus === 'offline' || serverStatus === 'stopped' || serverStatus === 'exited'
+    const isStopping = serverStatus === 'stopping'
+    const isStarting = serverStatus === 'starting' || serverStatus === 'installing'
 
     if (!selectedTenantId) {
         return (
-			<Card className="relative">
-                <CardHeader>
-                    <CardTitle>Select a tenant</CardTitle>
-                </CardHeader>
-            </Card>
+            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+                <p className="text-sm text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    Select a tenant first
+                </p>
+            </div>
         )
     }
 
     if (loading) {
+        return <div className="flex items-center justify-center py-12"><Spinner size="lg" /></div>
+    }
+
+    if (error || !server) {
         return (
-            <div className="flex items-center justify-center py-12">
-                <Spinner size="lg" />
+            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+                <div className="text-red-600 dark:text-red-400" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    {error || 'Server not found'}
+                </div>
             </div>
-        )
-    }
-
-    if (error) {
-        return (
-			<Card className="relative overflow-hidden">
-                <CardHeader>
-                    <CardTitle className="text-red-600">{error}</CardTitle>
-                </CardHeader>
-            </Card>
-        )
-    }
-
-    if (!server) {
-        return (
-			<Card className="relative overflow-hidden">
-                <CardHeader>
-                    <CardTitle>Server not found</CardTitle>
-                </CardHeader>
-            </Card>
         )
     }
 
     return (
-        <div className="relative">
-            {/* Connection Warning Overlay */}
-            {connectionFailed && (
-                <div className="fixed inset-0 backdrop-blur z-50 flex items-center justify-center">
-                    <Card className="max-w-md mx-4">
-                        <CardContent className="p-6 text-center">
-                            <ExclamationTriangleIcon className="w-12 h-12 text-amber-500 mx-auto mb-4" />
-                            <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2">
-                                Connection failed
-                            </h3>
-                            <p className="text-neutral-600 dark:text-neutral-400 mb-6">
-                                Unable to connect to the server console. Please check your connection and try again.
-                            </p>
-                            <div className="flex gap-3 justify-center">
-                                <Button
-                                    variant="ghost"
-                                    onClick={() => navigate('/servers')}
-                                >
-                                    Back to Servers
-                                </Button>
-                                <Button
-                                    onClick={() => {
-                                        setConnectionFailed(false)
-                                        connectWebSocket()
-                                    }}
-                                >
-                                    Retry Connection
-                                </Button>
-                            </div>
-                        </CardContent>
-                    </Card>
-                </div>
-            )}
-
-            <div className={`space-y-6 ${connectionFailed ? 'blur-sm' : ''}`}>
-                {/* Header */}
-                <div className="flex items-start justify-between">
-                    <div className="space-y-2">
-                        <div className="flex items-center gap-3">
-                            <h1 className="text-2xl font-semibold text-neutral-900 dark:text-neutral-100">
-                                {server.name}
-                            </h1>
-                            <div className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold uppercase tracking-wide ${getStatusColor(serverStatus)}`}>
-                                <div className="w-1.5 h-1.5 rounded-full bg-current mr-2 animate-pulse" />
-                                {serverStatus}
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-6 text-sm">
-                            <div className="flex items-center gap-2 text-neutral-600 dark:text-neutral-400">
-                                <span className="font-medium">IP:</span>
-                                <span className="font-mono bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 rounded text-xs">
-                                    {server.pteroServerId}
-                                </span>
-                            </div>
-                            <div className="flex items-center gap-2 text-neutral-600 dark:text-neutral-400">
-                                <span className="font-medium">Node:</span>
-                                <span className="font-mono bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 rounded text-xs">
-                                    {server.node || 'Unknown'}
-                                </span>
-                            </div>
-                        </div>
+        <div className="space-y-4 md:space-y-6">
+            {/* Header - Mobile Responsive */}
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                <div className="flex items-center gap-3">
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => navigate('/servers')}
+                        className="text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 p-1"
+                    >
+                        <ArrowLeftIcon className="w-4 h-4" />
+                    </Button>
+                    <div className="flex gap-1">
+                        <span className={`w-2 h-2 rounded-sm ${isRunning ? 'bg-green-500' : isOffline ? 'bg-red-500' : 'bg-yellow-500'}`}></span>
+                        <span className={`w-2 h-2 rounded-sm ${connected ? 'bg-green-500' : 'bg-neutral-500'}`}></span>
                     </div>
-                    
-                    <div className="flex items-center gap-2 flex-wrap">
-                        {getPowerButton()}
+                    <h1 className="text-xl md:text-2xl text-neutral-900 dark:text-neutral-100 tracking-wider truncate" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
+                        {server.name.toUpperCase()}
+                    </h1>
+                </div>
+                <div className="flex items-center gap-2 sm:ml-auto">
+                    <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-800 sm:hidden"></div>
+                    <span className={`text-[10px] px-2 py-1 rounded whitespace-nowrap ${
+                        isRunning ? 'bg-green-500/20 text-green-600 dark:text-green-400' :
+                        isOffline ? 'bg-red-500/20 text-red-600 dark:text-red-400' :
+                        'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400'
+                    }`} style={{ fontFamily: "'Space Mono', monospace" }}>
+                        {serverStatus.toUpperCase()}
+                    </span>
+                </div>
+            </div>
+
+            {/* Power Actions & Stats - Mobile Responsive */}
+            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-3 md:p-4">
+                <div className="flex flex-col gap-4">
+                    {/* Power Buttons - Wrap on mobile */}
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mr-1" style={{ fontFamily: "'Space Mono', monospace" }}>
+                            Power
+                        </span>
+                        <button
+                            onClick={() => sendPowerAction('start')}
+                            disabled={!!powerLoading || isRunning || isStarting}
+                            className="px-2 md:px-3 py-1 text-[10px] md:text-xs bg-green-600 hover:bg-green-700 disabled:bg-neutral-700 disabled:text-neutral-500 text-white transition-colors"
+                            style={{ fontFamily: "'Space Mono', monospace" }}
+                        >
+                            {powerLoading === 'start' ? '...' : 'START'}
+                        </button>
+                        <button
+                            onClick={() => sendPowerAction('restart')}
+                            disabled={!!powerLoading || isOffline}
+                            className="px-2 md:px-3 py-1 text-[10px] md:text-xs bg-orange-600 hover:bg-orange-700 disabled:bg-neutral-700 disabled:text-neutral-500 text-white transition-colors"
+                            style={{ fontFamily: "'Space Mono', monospace" }}
+                        >
+                            {powerLoading === 'restart' ? '...' : 'RESTART'}
+                        </button>
+                        <button
+                            onClick={() => sendPowerAction('stop')}
+                            disabled={!!powerLoading || isOffline}
+                            className="px-2 md:px-3 py-1 text-[10px] md:text-xs bg-red-600 hover:bg-red-700 disabled:bg-neutral-700 disabled:text-neutral-500 text-white transition-colors"
+                            style={{ fontFamily: "'Space Mono', monospace" }}
+                        >
+                            {powerLoading === 'stop' ? '...' : 'STOP'}
+                        </button>
+                        <button
+                            onClick={() => sendPowerAction('kill')}
+                            disabled={!!powerLoading || isOffline}
+                            className="px-2 md:px-3 py-1 text-[10px] md:text-xs bg-red-800 hover:bg-red-900 disabled:bg-neutral-700 disabled:text-neutral-500 text-white transition-colors"
+                            style={{ fontFamily: "'Space Mono', monospace" }}
+                        >
+                            {powerLoading === 'kill' ? '...' : 'KILL'}
+                        </button>
+                    </div>
+
+                    {/* Stats - Grid on mobile */}
+                    <div className="grid grid-cols-3 gap-2 md:gap-4">
+                        <ResourceBar
+                            label="MEM"
+                            used={stats ? formatBytes(stats.memory_bytes) : 0}
+                            total={server.memoryMb || 512}
+                            unit="MB"
+                        />
+                        <ResourceBar
+                            label="CPU"
+                            used={stats?.cpu_absolute || 0}
+                            total={server.cpuPercent || 100}
+                            unit="%"
+                        />
+                        <ResourceBar
+                            label="DISK"
+                            used={stats ? formatBytes(stats.disk_bytes) : 0}
+                            total={(server.diskMb || 5) * 1024}
+                            unit="MB"
+                        />
                     </div>
                 </div>
-
-            {/* Stats */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                <Card className="relative overflow-hidden">
-                    <CardContent className="p-4">
-                        <div className="flex mt-4 items-center gap-2 text-sm font-medium text-neutral-500 dark:text-neutral-400">
-                            Memory
-                        </div>
-                        <div className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
-                            {stats ? formatBytes(stats.memory_bytes) : 'N/A'}
-                        </div>
-                        <div className="text-xs text-neutral-500 dark:text-neutral-400">
-                            Limit: {resources ? formatBytes(resources.memory * 1024 * 1024) : 'N/A'}
-                        </div>
-                    </CardContent>
-					{stats && resources && (
-						<div className="absolute bottom-0 left-0 right-0 h-0.5 bg-neutral-100 dark:bg-neutral-800 rounded-full">
-							<div
-								className="relative h-full bg-black dark:bg-white rounded-full transition-all duration-700 ease-in-out"
-								style={{ width: `${Math.min(100, (stats.memory_bytes / (resources.memory * 1024 * 1024)) * 100)}%` }}
-							>
-								<div className="absolute -top-3 left-0 right-0 h-3 bg-gradient-to-t from-black/30 dark:from-white/40 to-transparent pointer-events-none blur-sm" />
-							</div>
-						</div>
-					)}
-                </Card>
-
-                <Card className="relative overflow-hidden">
-                    <CardContent className="p-4">
-                        <div className="flex mt-4 items-center gap-2 text-sm font-medium text-neutral-500 dark:text-neutral-400">
-                            CPU
-                        </div>
-                        <div className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
-                            {stats ? `${stats.cpu_absolute.toFixed(1)}%` : 'N/A'}
-                        </div>
-                        <div className="text-xs text-neutral-500 dark:text-neutral-400">
-                            Limit: {resources ? `${resources.cpu}%` : 'N/A'}
-                        </div>
-                    </CardContent>
-					{stats && resources && (
-						<div className="absolute bottom-0 left-0 right-0 h-0.5 bg-neutral-100 dark:bg-neutral-800 rounded-full">
-							<div
-								className="relative h-full bg-black dark:bg-white rounded-full transition-all duration-700 ease-in-out"
-								style={{ width: `${Math.min(100, (stats.cpu_absolute / resources.cpu) * 100)}%` }}
-							>
-								<div className="absolute -top-3 left-0 right-0 h-3 bg-gradient-to-t from-black/30 dark:from-white/40 to-transparent pointer-events-none blur-sm" />
-							</div>
-						</div>
-					)}
-                </Card>
-
-                <Card className="relative overflow-hidden">
-                    <CardContent className="p-4">
-                        <div className="flex mt-4 items-center gap-2 text-sm font-medium text-neutral-500 dark:text-neutral-400">
-                            Disk
-                        </div>
-                        <div className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
-                            {stats ? formatBytes(stats.disk_bytes) : 'N/A'}
-                        </div>
-                        <div className="text-xs text-neutral-500 dark:text-neutral-400">
-                            Limit: {resources ? formatBytes(resources.disk * 1024 * 1024) : 'N/A'}
-                        </div>
-                    </CardContent>
-					{stats && resources && (
-						<div className="absolute bottom-0 left-0 right-0 h-0.5 bg-neutral-100 dark:bg-neutral-800 rounded-full">
-							<div
-								className="relative h-full bg-black dark:bg-white rounded-full transition-all duration-700 ease-in-out"
-								style={{ width: `${Math.min(100, (stats.disk_bytes / (resources.disk * 1024 * 1024)) * 100)}%` }}
-							>
-								<div className="absolute -top-3 left-0 right-0 h-3 bg-gradient-to-t from-black/30 dark:from-white/40 to-transparent pointer-events-none blur-sm" />
-							</div>
-						</div>
-					)}
-                </Card>
-
-                <Card className="relative overflow-hidden">
-                    <CardContent className="p-4">
-                        <div className="flex mt-4 items-center gap-2 text-sm font-medium text-neutral-500 dark:text-neutral-400">
-                            Network
-                        </div>
-                        <div className="text-sm text-neutral-900 dark:text-neutral-100">
-                            ↓ {stats ? formatBytes(stats.network.rx_bytes) : 'N/A'}
-                        </div>
-                        <div className="text-sm text-neutral-900 dark:text-neutral-100">
-                            ↑ {stats ? formatBytes(stats.network.tx_bytes) : 'N/A'}
-                        </div>
-                    </CardContent>
-					{stats && (stats.network.rx_bytes + stats.network.tx_bytes > 0) && (
-						<div className="absolute bottom-0 left-0 right-0 h-0.5">
-							<div className="absolute inset-0 rounded-full bg-neutral-100 dark:bg-neutral-800" />
-							<div
-								className="absolute left-0 top-0 bottom-0 bg-yellow-400 rounded-l-full transition-all duration-700 ease-in-out"
-								style={{ width: `${(stats.network.rx_bytes / (stats.network.rx_bytes + stats.network.tx_bytes)) * 100}%` }}
-							>
-								<div className="absolute -top-2 left-0 right-0 h-2 bg-gradient-to-t from-yellow-300/40 to-transparent pointer-events-none blur-sm" />
-							</div>
-							<div
-								className="absolute right-0 top-0 bottom-0 bg-sky-400 rounded-r-full transition-all duration-700 ease-in-out"
-								style={{ width: `${(stats.network.tx_bytes / (stats.network.rx_bytes + stats.network.tx_bytes)) * 100}%` }}
-							>
-								<div className="absolute -top-2 left-0 right-0 h-2 bg-gradient-to-t from-sky-300/40 to-transparent pointer-events-none blur-sm" />
-							</div>
-						</div>
-					)}
-                </Card>
             </div>
 
             {/* Console */}
-            <Card className="h-[600px] flex flex-col p-0">
-                <CardContent className="flex-1 bg-black rounded-lg flex flex-col p-0">
-                    {/* Terminal */}
-                    <div className="flex-1 bg-black relative">
-                        <div 
-                            ref={terminalRef} 
-                            className="w-full h-full bg-black rounded overflow-y-auto"
-                            style={{ 
-                                fontFamily: '"Space Mono", "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace',
-                                minHeight: '400px',
-                                maxHeight: '400px',
-                                padding: '10px',
-                                fontSize: '14px',
-                                color: '#ffffff'
-                            }}
-                        />
-                        
-                        {/* Empty State */}
-                        {!hasLogs && connected && (
-                            <div className="absolute inset-4 flex items-center justify-center">
-                                <div className="text-center text-neutral-400">
-                                    <div className="flex items-center justify-center">
-                                        <div className="flex rounded-lg p-4 bg-white/10">
-                                            <CommandLineIcon className="w-5 h-5" />
-                                        </div>
-                                    </div>
-                                    <p className="text-lg font-medium text-white mt-8">Hmm... nothing yet.</p>
-                                    <p className="text-sm">Console output will appear here</p>
-                                </div>
-                            </div>
+            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-3 md:p-4">
+                <div className="flex items-center gap-2 md:gap-3 mb-3 md:mb-4">
+                    <h2 className="text-base md:text-lg text-neutral-900 dark:text-neutral-100 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
+                        CONSOLE
+                    </h2>
+                    <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-800"></div>
+                    <div className="flex items-center gap-2">
+                        {connecting ? (
+                            <span className="text-[10px] text-yellow-600 dark:text-yellow-400" style={{ fontFamily: "'Space Mono', monospace" }}>
+                                CONNECTING...
+                            </span>
+                        ) : connected ? (
+                            <span className="text-[10px] text-green-600 dark:text-green-400" style={{ fontFamily: "'Space Mono', monospace" }}>
+                                ● LIVE
+                            </span>
+                        ) : (
+                            <button
+                                onClick={connectWebSocket}
+                                className="text-[10px] text-red-600 dark:text-red-400 hover:text-red-500" 
+                                style={{ fontFamily: "'Space Mono', monospace" }}
+                            >
+                                ○ RECONNECT
+                            </button>
                         )}
                     </div>
-                    
-                    {/* Command Input */}
-                    <div>
-                        <form onSubmit={handleCommandSubmit} className="flex items-center">
-                            <input
-                                ref={commandInputRef}
-                                value={command}
-                                onChange={(e) => setCommand(e.target.value)}
-                                onKeyDown={handleKeyDown}
-                                placeholder={connected ? "$" : "Not connected to server"}
-                                disabled={!connected}
-                                className="flex-1 bg-white/10 px-3 py-3 rounded-l-xl placeholder-neutral-400 outline-none text-white"
-                                style={{ fontSize: '14px', fontWeight: '500' }}
-                            />
-                            <button
-                                type="submit"
-                                disabled={!connected || !command.trim()}
-                                className="bg-white/10 px-4 border-l border-white/5 py-4 hover:bg-white/15 transition-all duration-300 cursor-pointer hover:text-white rounded-r-xl placeholder-neutral-400 outline-none text-white"
-                                style={{ fontSize: '14px', fontWeight: '500' }}
+                </div>
+
+                {/* Log output - Responsive height */}
+                <div
+                    ref={logContainerRef}
+                    className="bg-black border border-neutral-800 p-2 md:p-4 h-64 md:h-96 overflow-y-auto font-mono text-xs md:text-sm"
+                    onClick={() => commandInputRef.current?.focus()}
+                >
+                    {logs.length === 0 ? (
+                        <div className="text-neutral-600" style={{ fontFamily: "'Space Mono', monospace" }}>
+                            {connecting ? 'Connecting...' : 'Waiting for output...'}
+                        </div>
+                    ) : (
+                        logs.map((log) => (
+                            <div
+                                key={log.id}
+                                className={`leading-relaxed break-all ${
+                                    log.type === 'error' ? 'text-red-400' :
+                                    log.type === 'success' ? 'text-green-400' :
+                                    log.type === 'info' ? 'text-blue-400' :
+                                    log.type === 'status' ? 'text-yellow-400' :
+                                    'text-neutral-300'
+                                }`}
+                                style={{ fontFamily: "'Space Mono', monospace" }}
                             >
-                                <ArrowUpRightIcon className="w-3 h-3 text-neutral-300" />
-                            </button>
-                        </form>
+                                <span className="text-neutral-600 mr-1 md:mr-2 hidden sm:inline">[{formatTimestamp(log.timestamp)}]</span>
+                                {log.text}
+                            </div>
+                        ))
+                    )}
+                </div>
+
+                {/* Command input */}
+                <form onSubmit={handleCommandSubmit} className="mt-2 flex gap-2">
+                    <div className="flex-1 relative">
+                        <span className="absolute left-2 md:left-3 top-1/2 -translate-y-1/2 text-neutral-500 text-xs md:text-sm" style={{ fontFamily: "'Space Mono', monospace" }}>
+                            &gt;
+                        </span>
+                        <Input
+                            ref={commandInputRef}
+                            value={command}
+                            onChange={(e) => setCommand(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            placeholder={connected ? "Command..." : "Connect first"}
+                            disabled={!connected}
+                            className="pl-6 md:pl-8 text-xs md:text-sm bg-black border-neutral-800 text-neutral-100 placeholder:text-neutral-600"
+                            style={{ fontFamily: "'Space Mono', monospace" }}
+                        />
                     </div>
-                </CardContent>
-            </Card>
+                    <Button
+                        type="submit"
+                        disabled={!connected || !command.trim()}
+                        className="px-3 md:px-4 text-xs md:text-sm bg-red-600 hover:bg-red-700 disabled:bg-neutral-800 text-white"
+                        style={{ fontFamily: "'Space Mono', monospace" }}
+                    >
+                        SEND
+                    </Button>
+                </form>
+            </div>
+
+            {/* Server Info - Mobile Responsive */}
+            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-3 md:p-4">
+                <div className="flex items-center gap-2 md:gap-3 mb-3 md:mb-4">
+                    <h2 className="text-base md:text-lg text-neutral-900 dark:text-neutral-100 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
+                        INFO
+                    </h2>
+                    <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-800"></div>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 text-[10px] md:text-xs" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    <div>
+                        <div className="text-[9px] md:text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Container</div>
+                        <div className="text-neutral-900 dark:text-neutral-100 truncate">{server.containerId?.slice(0, 8) || 'N/A'}</div>
+                    </div>
+                    <div>
+                        <div className="text-[9px] md:text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Node</div>
+                        <div className="text-neutral-900 dark:text-neutral-100 truncate">{server.node || 'Unknown'}</div>
+                    </div>
+                    <div>
+                        <div className="text-[9px] md:text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Memory</div>
+                        <div className="text-neutral-900 dark:text-neutral-100">{server.memoryMb || 0} MB</div>
+                    </div>
+                    <div>
+                        <div className="text-[9px] md:text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Disk</div>
+                        <div className="text-neutral-900 dark:text-neutral-100">{server.diskMb || 0} MB</div>
+                    </div>
+                </div>
             </div>
         </div>
     )
