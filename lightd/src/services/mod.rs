@@ -5,5 +5,5 @@ pub mod async_power;
 
 pub use power_actions::PowerActionService;
 pub use power_executor::{PowerExecutor, PowerCommand};
-pub use container_events::{ContainerEventHub, ContainerEvent, ContainerStats as EventContainerStats};
+pub use container_events::{ContainerEventHub, ContainerEvent, EventContainerStats};
 pub use async_power::AsyncPowerManager;

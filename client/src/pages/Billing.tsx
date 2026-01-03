@@ -4,6 +4,7 @@ import { useApi } from '@/api/client'
 import Spinner from '@/components/ui/Spinner'
 import { Button } from '@/components/ui/Button'
 import { Select } from '@/components/ui/Select'
+import LoadingAnimation from '@/components/loaders'
 
 interface CreditTransaction {
     id: string
@@ -154,7 +155,7 @@ export function BillingPage() {
     const displayedTransactions = useMemo(() => transactions, [transactions])
 
     if (loading) return (
-        <div className="flex items-center justify-center py-12"><Spinner size="lg" /></div>
+        <div className="flex items-center justify-center py-12"><LoadingAnimation/></div>
     )
 
     if (error) return (

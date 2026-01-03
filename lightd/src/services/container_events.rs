@@ -2,6 +2,7 @@
 //!
 //! This module provides a pub/sub system for container events.
 //! Multiple WebSocket connections can subscribe to the same container.
+//! Each WebSocket manages its own log/stats streamers.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ pub enum ContainerEvent {
     /// Container state changed (running, stopped, etc.)
     StateChanged { state: String },
     /// Container stats update
-    Stats(ContainerStats),
+    Stats(EventContainerStats),
     /// Console output from container
     ConsoleOutput { line: String },
     /// Daemon message
@@ -29,7 +30,7 @@ pub enum ContainerEvent {
 
 /// Container stats for broadcast
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerStats {
+pub struct EventContainerStats {
     pub memory_bytes: u64,
     pub memory_limit_bytes: u64,
     pub cpu_percent: f64,
@@ -42,7 +43,6 @@ pub struct ContainerStats {
 /// Event broadcaster for a single container
 struct ContainerBroadcaster {
     sender: broadcast::Sender<ContainerEvent>,
-    /// Current subscriber count
     subscriber_count: usize,
 }
 
@@ -58,7 +58,7 @@ impl ContainerEventHub {
     pub fn new() -> Self {
         Self {
             broadcasters: RwLock::new(HashMap::new()),
-            buffer_size: 256, // Buffer up to 256 events
+            buffer_size: 512, // Buffer up to 512 events
         }
     }
 
@@ -91,22 +91,33 @@ impl ContainerEventHub {
             broadcaster.subscriber_count = broadcaster.subscriber_count.saturating_sub(1);
             debug!("Subscriber left for container {}, remaining: {}", container_id, broadcaster.subscriber_count);
             
-            // Clean up broadcaster if no subscribers
+            // Keep broadcaster even with 0 subscribers - it will be reused
+            // Only remove if we want to clean up memory for containers that are rarely accessed
             if broadcaster.subscriber_count == 0 {
-                broadcasters.remove(container_id);
-                debug!("Removed broadcaster for container {} (no subscribers)", container_id);
+                // Optional: remove after some time, but for now keep it
+                // broadcasters.remove(container_id);
+                debug!("No subscribers left for container {}, keeping broadcaster", container_id);
             }
         }
     }
 
     /// Broadcast an event to all subscribers of a container
-    /// This is fire-and-forget - never blocks
     pub async fn broadcast(&self, container_id: &str, event: ContainerEvent) {
         let broadcasters = self.broadcasters.read().await;
         
         if let Some(broadcaster) = broadcasters.get(container_id) {
             // send() returns error if no receivers, which is fine
             let _ = broadcaster.sender.send(event);
+        } else {
+            // No broadcaster exists - create one temporarily for this event
+            drop(broadcasters);
+            let mut broadcasters = self.broadcasters.write().await;
+            let (sender, _) = broadcast::channel(self.buffer_size);
+            let _ = sender.send(event);
+            broadcasters.insert(container_id.to_string(), ContainerBroadcaster {
+                sender,
+                subscriber_count: 0,
+            });
         }
     }
 
@@ -132,8 +143,24 @@ impl ContainerEventHub {
     }
 
     /// Broadcast stats update
-    pub async fn broadcast_stats(&self, container_id: &str, stats: ContainerStats) {
+    pub async fn broadcast_stats(&self, container_id: &str, stats: EventContainerStats) {
         self.broadcast(container_id, ContainerEvent::Stats(stats)).await;
+    }
+
+    /// Broadcast power action started
+    pub async fn broadcast_power_started(&self, container_id: &str, action: &str) {
+        self.broadcast(container_id, ContainerEvent::PowerActionStarted {
+            action: action.to_string(),
+        }).await;
+    }
+
+    /// Broadcast power action completed
+    pub async fn broadcast_power_completed(&self, container_id: &str, action: &str, success: bool, message: &str) {
+        self.broadcast(container_id, ContainerEvent::PowerActionCompleted {
+            action: action.to_string(),
+            success,
+            message: message.to_string(),
+        }).await;
     }
 
     /// Get the number of subscribers for a container

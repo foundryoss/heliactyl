@@ -92,8 +92,7 @@ export function ConsolePage() {
         stats,
         statsHistory,
         isRunning,
-        isOffline,
-        reset: resetServerState
+        isOffline
     } = useServerStore()
 
     const addLog = useCallback((text: string, type: LogLine['type'] = 'stdout') => {
@@ -104,7 +103,7 @@ export function ConsolePage() {
     const formatBytes = useCallback((bytes: number): number => bytes === 0 ? 0 : parseFloat((bytes / (1024 * 1024)).toFixed(1)), [])
 
     // WebSocket hook
-    const { connect, disconnect, sendCommand: wsSendCommand, connected, connecting } = useServerWebSocket({
+    const { connect, sendCommand: wsSendCommand, connected, connecting } = useServerWebSocket({
         onLog: addLog,
         tenantId: selectedTenantId,
         serverId: serverId || null,
@@ -166,20 +165,20 @@ export function ConsolePage() {
         }
     }, [logs])
 
-    // Connect WebSocket when server is loaded
+    // Connect WebSocket when server is loaded - only trigger once when server becomes available
+    const hasConnectedRef = useRef(false)
     useEffect(() => { 
-        if (server && !connected && !connecting) {
+        if (server && serverId && !hasConnectedRef.current) {
+            hasConnectedRef.current = true
             connect()
         }
-    }, [server?.id, connected, connecting]) // Only depend on server.id, not the whole server object
-
-    // Cleanup on unmount
+    }, [server?.id, serverId])
+    
+    // Reset connection ref when serverId changes
     useEffect(() => {
-        return () => {
-            disconnect()
-            resetServerState()
-        }
-    }, [])
+        hasConnectedRef.current = false
+        setLogs([])
+    }, [serverId])
     
     // Parse limits from server response
     const parseLimit = (limitStr: string): number => {

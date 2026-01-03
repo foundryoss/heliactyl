@@ -100,3 +100,15 @@ curl http://localhost:8080/containers
 ## License
 
 MIT License
+
+# TODO
+Yes—if you have more than ~1 active viewer per container, “single shared streamer per container” is *dramatically* more effective than the current design.
+
+- **Current behavior:** every WebSocket connection spawns its own `docker.logs(follow=true)` and `docker.stats(stream=true)` stream. With $N$ viewers you do ~$2N$ long-lived Docker streams per container. Docker Engine becomes the bottleneck fast (CPU, memory, socket backpressure).
+- **Shared-streamer behavior:** you do **1 logs stream + 1 stats stream per container**, then fan out in-process to all viewers. That changes the Docker load from **O(N)** to **O(1)** per container, which is usually the real win.
+
+Will it make you closer to Wings?
+- Architecturally, yes: Wings-like daemons generally avoid “one Docker stats/log stream per viewer” and instead **multiplex** to many clients. Your existing event hub is already the right primitive; you’re just not using it to eliminate duplicate Docker subscriptions yet.
+- You’ll still need a couple details to match Wings-like UX: on connect, fetch a **one-time tail** (e.g., last 100 lines) for that viewer, then join the shared live stream; optionally keep a small ring buffer per container to serve “recent output” instantly.
+
+Tradeoff: slightly more daemon-side bookkeeping (per-container tasks + subscriber refcount + optional buffer), but the payoff under real usage is big and it’s the most direct way to reduce overhead without switching languages.
