@@ -1,7 +1,6 @@
-//! WebSocket handler
+//! WebSocket handler - Non-blocking token generation and connection handling
 //!
-//! Simple WebSocket handler that streams container logs.
-//! Based on docker-logs-streamer-via-web-socket approach.
+//! Uses lock-free state manager for instant lookups.
 
 use axum::{
     extract::{ws::WebSocketUpgrade, Query, State},
@@ -16,7 +15,7 @@ use tracing::{error, info};
 use crate::{
     models::ApiResponse,
     types::AppState,
-    websocket::WebSocketConnection,
+    websocket::WebSocketHandler,
 };
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +37,7 @@ pub struct TokenResponse {
 }
 
 /// GET /websocket/generate?container_id=xxx
+/// Non-blocking - uses lock-free state manager
 #[axum::debug_handler]
 pub async fn generate_websocket_token(
     State(state): State<AppState>,
@@ -45,12 +45,13 @@ pub async fn generate_websocket_token(
 ) -> Result<Json<ApiResponse<TokenResponse>>, StatusCode> {
     info!("Generating WebSocket token for container: {}", params.container_id);
 
+    // Lock-free lookup
     let (container_id, container_uuid) = {
-        let state_manager = state.state_manager.lock().await;
-
-        if let Some((uuid, _)) = state_manager.find_by_container_id(&params.container_id) {
-            (params.container_id.clone(), uuid.clone())
-        } else if let Some(container_state) = state_manager.get_container(&params.container_id) {
+        // Try to find by container ID first
+        if let Some((uuid, _)) = state.state_manager.find_by_container_id(&params.container_id) {
+            (params.container_id.clone(), uuid)
+        } else if let Some(container_state) = state.state_manager.get_container(&params.container_id) {
+            // Try as UUID
             if let Some(cid) = &container_state.container_id {
                 (cid.clone(), params.container_id.clone())
             } else {
@@ -83,6 +84,7 @@ pub async fn generate_websocket_token(
 }
 
 /// GET /websocket?token=xxx - WebSocket upgrade
+/// Non-blocking - validation is instant
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
     Query(params): Query<WebSocketQuery>,
@@ -103,9 +105,8 @@ pub async fn websocket_handler(
         token.container_id, token.container_uuid
     );
 
-    // WebSocketConnection handles all streaming internally via broadcast channels
     Ok(ws.on_upgrade(move |socket| async move {
-        let conn = WebSocketConnection::new(token, socket, Arc::new(state));
-        conn.handle().await;
+        let handler = WebSocketHandler::new(token, socket, Arc::new(state));
+        handler.handle().await;
     }))
 }

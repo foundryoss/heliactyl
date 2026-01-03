@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
-axum = { version = "0.7", features = ["ws", "macros"] }
+axum = { version = "0.7", features = ["ws", "macros","multipart"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bollard = "0.16"
@@ -29,3 +29,9 @@ base64 = "0.22"
 sha2 = "0.10"
 tokio-tungstenite = "0.21"
 reqwest = { version = "0.12", features = ["json"] }
+num_cpus = "1.16"
+dashmap = "5.5"
+tar = "0.4"
+flate2 = "1.0"
+bzip2 = "0.4"
+zip = "0.6"

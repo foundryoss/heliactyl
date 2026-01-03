@@ -1,3 +1,7 @@
+//! Snapshot handlers - Non-blocking snapshot operations
+//!
+//! Uses lock-free state manager for all lookups.
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -47,85 +51,52 @@ pub async fn create_snapshot(
 ) -> Result<Json<ApiResponse<SnapshotResponse>>, StatusCode> {
     info!("Creating snapshot for container: {}", container_uuid);
     
-    // Check if container exists and get container ID
-    let container_state = {
-        let state_manager = state.state_manager.lock().await;
-        state_manager.get_container(&container_uuid).cloned()
-    };
-    
-    let container_state = match container_state {
-        Some(state) => state,
-        None => {
-            return Ok(Json(ApiResponse::error(format!("Container {} not found", container_uuid))));
-        }
+    // Lock-free lookup
+    let container_state = match state.state_manager.get_container(&container_uuid) {
+        Some(s) => s,
+        None => return Ok(Json(ApiResponse::error(format!("Container {} not found", container_uuid)))),
     };
     
     let container_id = match &container_state.container_id {
-        Some(id) => id,
-        None => {
-            return Ok(Json(ApiResponse::error("Container has no Docker ID".to_string())));
-        }
+        Some(id) => id.clone(),
+        None => return Ok(Json(ApiResponse::error("Container has no Docker ID".to_string()))),
     };
     
-    // Check if container is locked
-    {
-        let state_manager = state.state_manager.lock().await;
-        if state_manager.is_container_locked(&container_uuid) {
-            return Ok(Json(ApiResponse::error("Container is currently locked".to_string())));
-        }
+    // Lock-free check
+    if state.state_manager.is_container_locked(&container_uuid) {
+        return Ok(Json(ApiResponse::error("Container is currently locked".to_string())));
     }
     
-    // Lock the container during snapshot creation
-    {
-        let mut state_manager = state.state_manager.lock().await;
-        state_manager.lock_container(&container_uuid, "Creating snapshot").await
-            .map_err(|e| {
-                error!("Failed to lock container {}: {}", container_uuid, e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-    }
+    // Lock container
+    let _ = state.state_manager.lock_container(&container_uuid, "Creating snapshot").await;
     
-    // Create snapshot manager
     let snapshot_manager = SnapshotManager::new(
         state.docker.client().clone(),
         &state.config.storage.base_path,
     );
     
-    // Initialize snapshot storage
     if let Err(e) = snapshot_manager.init().await {
         error!("Failed to initialize snapshot storage: {}", e);
-        // Unlock container before returning
-        let mut state_manager = state.state_manager.lock().await;
-        let _ = state_manager.unlock_container(&container_uuid).await;
+        let _ = state.state_manager.unlock_container(&container_uuid).await;
         return Ok(Json(ApiResponse::error("Failed to initialize snapshot storage".to_string())));
     }
     
-    // Create the snapshot
-    let result = {
-        let state_manager = state.state_manager.lock().await;
-        snapshot_manager.create_snapshot(container_id, &container_uuid, &*state_manager).await
-    };
+    let result = snapshot_manager.create_snapshot(&container_id, &container_uuid, &*state.state_manager).await;
     
-    // Unlock container
-    {
-        let mut state_manager = state.state_manager.lock().await;
-        if let Err(e) = state_manager.unlock_container(&container_uuid).await {
-            error!("Failed to unlock container {}: {}", container_uuid, e);
-        }
-    }
+    let _ = state.state_manager.unlock_container(&container_uuid).await;
     
     match result {
         Ok(snapshot_id) => {
             let response = SnapshotResponse {
                 snapshot_id: snapshot_id.clone(),
-                container_uuid: container_uuid.clone(),
+                container_uuid,
                 status: "success".to_string(),
                 message: format!("Snapshot {} created successfully", snapshot_id),
             };
             Ok(Json(ApiResponse::success(response)))
         }
         Err(e) => {
-            error!("Failed to create snapshot for container {}: {}", container_uuid, e);
+            error!("Failed to create snapshot: {}", e);
             Ok(Json(ApiResponse::error(format!("Failed to create snapshot: {}", e))))
         }
     }
@@ -139,87 +110,51 @@ pub async fn restore_snapshot(
 ) -> Result<Json<ApiResponse<RestoreResponse>>, StatusCode> {
     info!("Restoring snapshot: {}", snapshot_id);
     
-    // Get container UUID from request (we need to know which container to restore to)
     let container_uuid = req.container_uuid;
     
-    // Check if container exists and get container ID
-    let container_state = {
-        let state_manager = state.state_manager.lock().await;
-        state_manager.get_container(&container_uuid).cloned()
-    };
-    
-    let container_state = match container_state {
-        Some(state) => state,
-        None => {
-            return Ok(Json(ApiResponse::error(format!("Container {} not found", container_uuid))));
-        }
+    // Lock-free lookup
+    let container_state = match state.state_manager.get_container(&container_uuid) {
+        Some(s) => s,
+        None => return Ok(Json(ApiResponse::error(format!("Container {} not found", container_uuid)))),
     };
     
     let container_id = match &container_state.container_id {
-        Some(id) => id,
-        None => {
-            return Ok(Json(ApiResponse::error("Container has no Docker ID".to_string())));
-        }
+        Some(id) => id.clone(),
+        None => return Ok(Json(ApiResponse::error("Container has no Docker ID".to_string()))),
     };
     
-    // Check if container is locked
-    {
-        let state_manager = state.state_manager.lock().await;
-        if state_manager.is_container_locked(&container_uuid) {
-            return Ok(Json(ApiResponse::error("Container is currently locked".to_string())));
-        }
+    if state.state_manager.is_container_locked(&container_uuid) {
+        return Ok(Json(ApiResponse::error("Container is currently locked".to_string())));
     }
     
-    // Lock the container during restore
-    {
-        let mut state_manager = state.state_manager.lock().await;
-        state_manager.lock_container(&container_uuid, "Restoring snapshot").await
-            .map_err(|e| {
-                error!("Failed to lock container {}: {}", container_uuid, e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-    }
+    let _ = state.state_manager.lock_container(&container_uuid, "Restoring snapshot").await;
     
-    // Create snapshot manager
     let snapshot_manager = SnapshotManager::new(
         state.docker.client().clone(),
         &state.config.storage.base_path,
     );
     
-    // Initialize snapshot storage
     if let Err(e) = snapshot_manager.init().await {
         error!("Failed to initialize snapshot storage: {}", e);
-        // Unlock container before returning
-        let mut state_manager = state.state_manager.lock().await;
-        let _ = state_manager.unlock_container(&container_uuid).await;
+        let _ = state.state_manager.unlock_container(&container_uuid).await;
         return Ok(Json(ApiResponse::error("Failed to initialize snapshot storage".to_string())));
     }
     
-    // Check if snapshot exists
     if let Err(e) = snapshot_manager.get_snapshot_metadata(&snapshot_id).await {
         error!("Snapshot {} not found: {}", snapshot_id, e);
-        // Unlock container before returning
-        let mut state_manager = state.state_manager.lock().await;
-        let _ = state_manager.unlock_container(&container_uuid).await;
+        let _ = state.state_manager.unlock_container(&container_uuid).await;
         return Ok(Json(ApiResponse::error(format!("Snapshot {} not found", snapshot_id))));
     }
     
-    // Restore the snapshot
-    let result = snapshot_manager.restore_snapshot(&snapshot_id, container_id).await;
+    let result = snapshot_manager.restore_snapshot(&snapshot_id, &container_id).await;
     
-    // Unlock container
-    {
-        let mut state_manager = state.state_manager.lock().await;
-        if let Err(e) = state_manager.unlock_container(&container_uuid).await {
-            error!("Failed to unlock container {}: {}", container_uuid, e);
-        }
-    }
+    let _ = state.state_manager.unlock_container(&container_uuid).await;
     
     match result {
         Ok(_) => {
             let response = RestoreResponse {
                 new_container_uuid: container_uuid.clone(),
-                new_container_id: container_id.clone(),
+                new_container_id: container_id.to_string(),
                 snapshot_id: snapshot_id.clone(),
                 status: "success".to_string(),
                 message: format!("Snapshot {} restored to container {}", snapshot_id, container_uuid),
@@ -239,13 +174,11 @@ pub async fn list_snapshots(
 ) -> Result<Json<ApiResponse<Vec<crate::docker::snapshot::SnapshotInfo>>>, StatusCode> {
     info!("Listing all snapshots");
     
-    // Create snapshot manager
     let snapshot_manager = SnapshotManager::new(
         state.docker.client().clone(),
         &state.config.storage.base_path,
     );
     
-    // Initialize snapshot storage
     if let Err(e) = snapshot_manager.init().await {
         error!("Failed to initialize snapshot storage: {}", e);
         return Ok(Json(ApiResponse::error("Failed to initialize snapshot storage".to_string())));
@@ -267,13 +200,11 @@ pub async fn get_snapshot_info(
 ) -> Result<Json<ApiResponse<crate::docker::snapshot::SnapshotMetadata>>, StatusCode> {
     info!("Getting info for snapshot: {}", snapshot_id);
     
-    // Create snapshot manager
     let snapshot_manager = SnapshotManager::new(
         state.docker.client().clone(),
         &state.config.storage.base_path,
     );
     
-    // Initialize snapshot storage
     if let Err(e) = snapshot_manager.init().await {
         error!("Failed to initialize snapshot storage: {}", e);
         return Ok(Json(ApiResponse::error("Failed to initialize snapshot storage".to_string())));
@@ -295,13 +226,11 @@ pub async fn delete_snapshot(
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     info!("Deleting snapshot: {}", snapshot_id);
     
-    // Create snapshot manager
     let snapshot_manager = SnapshotManager::new(
         state.docker.client().clone(),
         &state.config.storage.base_path,
     );
     
-    // Initialize snapshot storage
     if let Err(e) = snapshot_manager.init().await {
         error!("Failed to initialize snapshot storage: {}", e);
         return Ok(Json(ApiResponse::error("Failed to initialize snapshot storage".to_string())));
@@ -323,13 +252,11 @@ pub async fn list_container_snapshots(
 ) -> Result<Json<ApiResponse<Vec<crate::docker::snapshot::SnapshotInfo>>>, StatusCode> {
     info!("Listing snapshots for container: {}", container_uuid);
     
-    // Create snapshot manager
     let snapshot_manager = SnapshotManager::new(
         state.docker.client().clone(),
         &state.config.storage.base_path,
     );
     
-    // Initialize snapshot storage
     if let Err(e) = snapshot_manager.init().await {
         error!("Failed to initialize snapshot storage: {}", e);
         return Ok(Json(ApiResponse::error("Failed to initialize snapshot storage".to_string())));
@@ -337,7 +264,6 @@ pub async fn list_container_snapshots(
     
     match snapshot_manager.list_snapshots().await {
         Ok(snapshots) => {
-            // Filter snapshots for this container
             let container_snapshots: Vec<_> = snapshots
                 .into_iter()
                 .filter(|s| s.container_uuid == container_uuid)

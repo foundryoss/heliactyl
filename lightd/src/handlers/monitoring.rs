@@ -79,7 +79,8 @@ pub async fn get_container_metrics(
     info!("Getting metrics for container: {}", container_id);
     
     if let Some(monitor) = &state.resource_monitor {
-        let metrics = monitor.get_container_metrics(&container_id).await;
+        // These are now synchronous (lock-free)
+        let metrics = monitor.get_container_metrics(&container_id);
         let ru_history = monitor.get_container_ru_history(&container_id).await;
         
         let response = ContainerMetricsResponse {
@@ -102,7 +103,8 @@ pub async fn get_container_metrics_history(
     info!("Getting metrics history for container: {}", container_id);
     
     if let Some(monitor) = &state.resource_monitor {
-        if let Some(mut history) = monitor.get_container_metrics_history(&container_id).await {
+        // This is now synchronous (lock-free)
+        if let Some(mut history) = monitor.get_container_metrics_history(&container_id) {
             // Apply limit if specified
             if let Some(limit) = query.limit {
                 let start_index = if history.len() > limit {

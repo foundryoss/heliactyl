@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, State, Multipart},
     http::StatusCode,
     response::Json,
 };
@@ -44,7 +44,7 @@ pub async fn list_servers(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "Database error" }))))?;
     
-    let mut servers = Vec::new();
+    let mut server_records = Vec::new();
     
     while let Some(result) = cursor.next().await {
         if let Ok(server) = result {
@@ -53,10 +53,20 @@ pub async fn list_servers(
                 tracing::warn!("Server {} has empty container_id, skipping", server.name);
                 continue;
             }
-            
+            server_records.push(server);
+        }
+    }
+    
+    // Fetch all container states concurrently
+    let state_futures: Vec<_> = server_records.iter().map(|server| {
+        let server_node_id = server.node_id.clone();
+        let server_container_id = server.container_id.clone();
+        let nodes_collection = nodes_collection.clone();
+        
+        async move {
             // Get the node for this server
             let node = nodes_collection
-                .find_one(doc! { "_id": mongodb::bson::oid::ObjectId::parse_str(&server.node_id).ok() })
+                .find_one(doc! { "_id": mongodb::bson::oid::ObjectId::parse_str(&server_node_id).ok() })
                 .await
                 .ok()
                 .flatten();
@@ -68,41 +78,49 @@ pub async fn list_servers(
                 let daemon_url = format!("{}://{}", node.network.scheme, node.network.uri);
                 let daemon = crate::daemon::client::DaemonClient::new(daemon_url.clone(), "".to_string());
                 
-                tracing::debug!("Querying daemon {} for container {}", daemon_url, server.container_id);
+                tracing::debug!("Querying daemon {} for container {}", daemon_url, server_container_id);
                 
-                match daemon.get_container(&server.container_id).await {
+                match daemon.get_container(&server_container_id).await {
                     Ok(container) => {
                         tracing::debug!("Got container state: {}", container.state);
                         state_str = container.state;
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to get container {} from daemon: {}", server.container_id, e);
+                        tracing::warn!("Failed to get container {} from daemon: {}", server_container_id, e);
                     }
                 }
             } else {
-                tracing::warn!("Node {} not found for server {}", server.node_id, server.name);
+                tracing::warn!("Node {} not found for server", server_node_id);
             }
             
-            servers.push(json!({
-                "id": server.id.map(|id| id.to_hex()),
-                "containerId": server.container_id,
-                "name": server.name,
-                "description": server.description,
-                "dockerImage": server.docker_image,
-                "state": state_str,
-                "limits": server.limits,
-                "network": {
-                    "ports": server.network.ports,
-                    "allocatedPorts": server.network.allocated_ports
-                },
-                "startup": server.startup,
-                "serverSoftwareId": server.server_software_id,
-                "nodeId": server.node_id,
-                "createdAt": server.created_at.to_rfc3339(),
-                "updatedAt": server.updated_at.to_rfc3339()
-            }));
+            state_str
         }
-    }
+    }).collect();
+    
+    // Wait for all state queries to complete concurrently
+    let states = futures_util::future::join_all(state_futures).await;
+    
+    // Build response with fetched states
+    let servers: Vec<_> = server_records.iter().zip(states.iter()).map(|(server, state_str)| {
+        json!({
+            "id": server.id.map(|id| id.to_hex()),
+            "containerId": server.container_id,
+            "name": server.name,
+            "description": server.description,
+            "dockerImage": server.docker_image,
+            "state": state_str,
+            "limits": server.limits,
+            "network": {
+                "ports": server.network.ports,
+                "allocatedPorts": server.network.allocated_ports
+            },
+            "startup": server.startup,
+            "serverSoftwareId": server.server_software_id,
+            "nodeId": server.node_id,
+            "createdAt": server.created_at.to_rfc3339(),
+            "updatedAt": server.updated_at.to_rfc3339()
+        })
+    }).collect();
     
     Ok(Json(json!({ "items": servers })))
 }
@@ -627,5 +645,358 @@ pub async fn get_server_websocket(
         "token": token,
         "socket": socket_url,
         "expiresAt": data["expires_at"]
+    })))
+}
+
+
+// ============================================================================
+// Filesystem Routes
+// ============================================================================
+
+/// List files in server directory
+pub async fn list_server_files(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let path = params.get("path").map(|s| s.as_str()).unwrap_or("/home/container");
+    
+    let result = daemon.list_files(&server.container_id, path).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    // The daemon already returns the data in the correct format (items with isDirectory, modifiedAt, etc.)
+    // Just extract the data.items array and pass it through
+    if let Some(data) = result.get("data") {
+        // Check for new format first (items)
+        if let Some(items) = data.get("items") {
+            return Ok(Json(json!({ "items": items })));
+        }
+        // Fallback to old format (files) and transform
+        if let Some(files) = data.get("files").and_then(|e| e.as_array()) {
+            let items: Vec<serde_json::Value> = files.iter().map(|entry| {
+                json!({
+                    "name": entry.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                    "isDirectory": entry.get("is_directory").and_then(|d| d.as_bool()).unwrap_or(false),
+                    "size": entry.get("size").and_then(|s| s.as_u64()).unwrap_or(0),
+                    "modifiedAt": entry.get("modified").and_then(|m| m.as_str()).unwrap_or("")
+                })
+            }).collect();
+            
+            return Ok(Json(json!({ "items": items })));
+        }
+    }
+    
+    Ok(Json(json!({ "items": [] })))
+}
+
+/// Read file content from server
+pub async fn read_server_file(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let path = params.get("path").ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing path parameter" })))
+    })?;
+    
+    let content = daemon.read_file(&server.container_id, path).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "content": content })))
+}
+
+/// Write file content to server
+pub async fn write_server_file(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let path = payload.get("path").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing path" })))
+    })?;
+    
+    let content = payload.get("content").and_then(|c| c.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing content" })))
+    })?;
+    
+    daemon.write_file(&server.container_id, path, content).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Delete file or directory from server
+pub async fn delete_server_file(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let path = payload.get("path").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing path" })))
+    })?;
+    
+    daemon.delete_file(&server.container_id, path).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Create folder in server
+pub async fn create_server_folder(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let path = payload.get("path").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing path" })))
+    })?;
+    
+    daemon.create_folder(&server.container_id, path).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Rename file in server
+pub async fn rename_server_file(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let old_path = payload.get("oldPath").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing oldPath" })))
+    })?;
+    
+    let new_path = payload.get("newPath").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing newPath" })))
+    })?;
+    
+    daemon.rename_file(&server.container_id, old_path, new_path).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Copy file in server
+pub async fn copy_server_file(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let source_path = payload.get("sourcePath").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing sourcePath" })))
+    })?;
+    
+    let destination_path = payload.get("destinationPath").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing destinationPath" })))
+    })?;
+    
+    daemon.copy_file(&server.container_id, source_path, destination_path).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Compress files/folders into archive
+pub async fn compress_server_files(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    // Support both sourcePaths (array) and sourcePath (single string) for backward compatibility
+    let source_paths = if let Some(paths_array) = payload.get("sourcePaths").and_then(|p| p.as_array()) {
+        paths_array.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect::<Vec<String>>()
+    } else if let Some(single_path) = payload.get("sourcePath").and_then(|p| p.as_str()) {
+        vec![single_path.to_string()]
+    } else {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing sourcePath or sourcePaths" }))));
+    };
+    
+    if source_paths.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "sourcePaths cannot be empty" }))));
+    }
+    
+    let archive_path = payload.get("archivePath").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing archivePath" })))
+    })?;
+    
+    let compression = payload.get("compression").and_then(|c| c.as_str()).unwrap_or("gzip");
+    
+    let message = daemon.compress_files(&server.container_id, &source_paths, archive_path, compression).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "ok": true, "message": message })))
+}
+
+/// Decompress archive
+pub async fn decompress_server_file(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let archive_path = payload.get("archivePath").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing archivePath" })))
+    })?;
+    
+    let destination_path = payload.get("destinationPath").and_then(|p| p.as_str()).unwrap_or("/");
+    
+    let message = daemon.extract_archive(&server.container_id, archive_path, destination_path).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "ok": true, "message": message })))
+}
+
+/// Change file permissions
+pub async fn chmod_server_file(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let path = payload.get("path").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing path" })))
+    })?;
+    
+    let permissions = payload.get("permissions").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing permissions" })))
+    })?;
+    
+    daemon.chmod(&server.container_id, path, permissions).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Change file ownership
+pub async fn chown_server_file(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let path = payload.get("path").and_then(|p| p.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing path" })))
+    })?;
+    
+    let owner = payload.get("owner").and_then(|o| o.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing owner" })))
+    })?;
+    
+    daemon.chown(&server.container_id, path, owner).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+    
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Upload file to server
+pub async fn upload_server_file(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((tenant_id, server_id)): axum::extract::Path<(String, String)>,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth_user.user.id.map(|id| id.to_hex()).unwrap_or_default();
+    
+    let (server, daemon) = get_server_and_daemon(&state, &tenant_id, &server_id, &user_id).await?;
+    
+    let mut uploaded_files = Vec::new();
+    let mut target_path = "/".to_string();
+    
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Failed to read multipart: {}", e) })))
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+        
+        if name == "path" {
+            target_path = field.text().await.map_err(|e| {
+                (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Failed to read path: {}", e) })))
+            })?;
+            continue;
+        }
+        
+        if name == "file" || name == "files" {
+            let file_name = field.file_name().unwrap_or("uploaded_file").to_string();
+            let data = field.bytes().await.map_err(|e| {
+                (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Failed to read file: {}", e) })))
+            })?;
+            
+            // Build the full path
+            let file_path = if target_path == "/" || target_path.is_empty() {
+                format!("/{}", file_name)
+            } else {
+                format!("{}/{}", target_path.trim_end_matches('/'), file_name)
+            };
+            
+            // Upload to daemon
+            daemon.upload_file(&server.container_id, &file_path, &data).await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))))?;
+            
+            uploaded_files.push(file_name);
+        }
+    }
+    
+    if uploaded_files.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "No files uploaded" }))));
+    }
+    
+    Ok(Json(json!({ 
+        "ok": true, 
+        "message": format!("Uploaded {} file(s)", uploaded_files.len()),
+        "files": uploaded_files
     })))
 }

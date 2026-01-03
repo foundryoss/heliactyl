@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod connection;
 pub mod token_manager;
+pub mod handler;
 
 pub use connection::*;
 pub use token_manager::*;
+pub use handler::WebSocketHandler;
 
 /// WebSocket events (Server -> Client)
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -85,8 +87,37 @@ impl WsMessage {
         }
     }
 
-    /// Create stats message with container resource usage
-    pub fn stats(stats_json: &str) -> Self {
+    /// Create stats message with container resource usage (JSON string)
+    pub fn stats_json(stats_json: &str) -> Self {
+        Self {
+            event: WsEvent::Stats,
+            args: vec![stats_json.to_string()],
+        }
+    }
+    
+    /// Create stats message with individual values
+    pub fn stats(
+        memory_bytes: u64,
+        memory_limit_bytes: u64,
+        cpu_percent: f64,
+        network_rx_bytes: u64,
+        network_tx_bytes: u64,
+        uptime: u64,
+        state: &str,
+        disk_bytes: u64,
+    ) -> Self {
+        let stats_json = serde_json::json!({
+            "memory_bytes": memory_bytes,
+            "memory_limit_bytes": memory_limit_bytes,
+            "cpu_absolute": cpu_percent,
+            "network": {
+                "rx_bytes": network_rx_bytes,
+                "tx_bytes": network_tx_bytes,
+            },
+            "uptime": uptime,
+            "state": state,
+            "disk_bytes": disk_bytes,
+        });
         Self {
             event: WsEvent::Stats,
             args: vec![stats_json.to_string()],

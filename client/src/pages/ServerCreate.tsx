@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/Label'
 import Spinner from '@/components/ui/Spinner'
 import { useAlert } from '@/components/ui/Alert'
 import { ArrowLeftIcon } from '@heroicons/react/24/outline'
+import LoadingAnimation from '@/components/loaders'
 
 interface ServerSoftware {
     id: string
@@ -134,7 +135,7 @@ export function ServerCreatePage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center py-12">
-                <Spinner size="lg" />
+                <LoadingAnimation />
             </div>
         )
     }

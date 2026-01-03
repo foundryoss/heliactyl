@@ -20,7 +20,7 @@ pub struct CreateContainerRequest {
     pub update_content: Option<String>,  // Shell script to run for updates
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ResourceLimits {
     pub cpu: Option<String>,    // e.g., "2.0", "0.5"
     pub memory: Option<String>, // e.g., "2g", "512m"
@@ -207,7 +207,8 @@ pub struct ChownRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateArchiveRequest {
-    pub source_path: String,
+    #[serde(alias = "source_path")]
+    pub source_paths: Vec<String>, // Support multiple files
     pub archive_path: String,
     pub compression: Option<String>, // "gzip", "bzip2", "xz", or None
 }
@@ -220,7 +221,8 @@ pub struct ExtractArchiveRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateZipRequest {
-    pub source_path: String,
+    #[serde(alias = "source_path")]
+    pub source_paths: Vec<String>, // Support multiple files
     pub zip_path: String,
 }
 

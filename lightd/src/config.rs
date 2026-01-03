@@ -23,6 +23,14 @@ fn default_version() -> String {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Number of worker threads for the async runtime (default: number of CPU cores * 2)
+    #[serde(default = "default_worker_threads")]
+    pub worker_threads: usize,
+}
+
+fn default_worker_threads() -> usize {
+    // Default to 2x CPU cores for good concurrency, minimum 4
+    std::cmp::max(num_cpus::get() * 2, 4)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

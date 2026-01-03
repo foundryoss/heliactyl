@@ -1,5 +1,6 @@
 import React from 'react'
 import { useLocation } from 'react-router-dom'
+import { gsap } from 'gsap'
 
 interface PageTransitionProps {
     children: React.ReactNode
@@ -7,55 +8,70 @@ interface PageTransitionProps {
 
 export function PageTransition({ children }: PageTransitionProps) {
     const location = useLocation()
-    const [phase, setPhase] = React.useState<'idle' | 'blurring-out' | 'blurring-in'>('idle')
     const [displayLocation, setDisplayLocation] = React.useState(location)
     const [displayChildren, setDisplayChildren] = React.useState(children)
-    const timersRef = React.useRef<NodeJS.Timeout[]>([])
+    const containerRef = React.useRef<HTMLDivElement>(null)
+    const isTransitioning = React.useRef(false)
 
     React.useEffect(() => {
-        // Clear any existing timers
-        timersRef.current.forEach(timer => clearTimeout(timer))
-        timersRef.current = []
+        if (location.pathname !== displayLocation.pathname && !isTransitioning.current) {
+            isTransitioning.current = true
+            const container = containerRef.current
 
-        if (location.pathname !== displayLocation.pathname) {
-            // Start blur out phase
-            setPhase('blurring-out')
-            
-            const timer1 = setTimeout(() => {
-                // Switch content and start blur in
+            if (!container) {
                 setDisplayLocation(location)
                 setDisplayChildren(children)
-                setPhase('blurring-in')
-                
-                const timer2 = setTimeout(() => {
-                    setPhase('idle')
-                }, 150)
-                
-                timersRef.current.push(timer2)
-            }, 150)
+                isTransitioning.current = false
+                return
+            }
 
-            timersRef.current.push(timer1)
-        } else {
-            // Same page - update children immediately
+            // Create a timeline for smooth sequential animations
+            const tl = gsap.timeline({
+                onComplete: () => {
+                    isTransitioning.current = false
+                }
+            })
+
+            // Animate out: fade + blur + slight scale down + slide up
+            tl.to(container, {
+                opacity: 0,
+                filter: 'blur(8px)',
+                scale: 0.96,
+                y: -20,
+                duration: 0.25,
+                ease: 'power2.in',
+                onComplete: () => {
+                    // Switch content while invisible
+                    setDisplayLocation(location)
+                    setDisplayChildren(children)
+                }
+            })
+            // Animate in: fade + blur removal + scale back + slide to position
+            .fromTo(container,
+                {
+                    opacity: 0,
+                    filter: 'blur(8px)',
+                    scale: 1.02,
+                    y: 20,
+                },
+                {
+                    opacity: 1,
+                    filter: 'blur(0px)',
+                    scale: 1,
+                    y: 0,
+                    duration: 0.3,
+                    ease: 'power2.out',
+                }
+            )
+
+        } else if (location.pathname === displayLocation.pathname) {
+            // Same page - update children immediately without animation
             setDisplayChildren(children)
-        }
-
-        return () => {
-            timersRef.current.forEach(timer => clearTimeout(timer))
-            timersRef.current = []
         }
     }, [location.pathname, displayLocation.pathname, children])
 
-    const isBlurred = phase === 'blurring-out'
-
     return (
-        <div 
-            className={`transition-all duration-150 ease-in-out ${
-                isBlurred
-                    ? 'opacity-0 blur-sm scale-[0.98]' 
-                    : 'opacity-100 blur-0 scale-100'
-            }`}
-        >
+        <div ref={containerRef}>
             {displayChildren}
         </div>
     )

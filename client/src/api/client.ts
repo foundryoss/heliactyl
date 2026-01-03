@@ -72,6 +72,35 @@ export function createApi(baseUrl: string, getToken: () => string | null) {
 			stop: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/stop`, { method: 'POST' }),
 			restart: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/restart`, { method: 'POST' }),
 			kill: (tenantId: string, id: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/kill`, { method: 'POST' }),
+			// Filesystem
+		listFiles: (tenantId: string, id: string, path: string = '/') => request<{ items: Array<{ name: string; isDirectory: boolean; size: number; modifiedAt: string }> }>(`api/tenants/${tenantId}/servers/${id}/files?path=${encodeURIComponent(path)}`),
+			readFile: (tenantId: string, id: string, path: string) => request<{ content: string }>(`api/tenants/${tenantId}/servers/${id}/files/read?path=${encodeURIComponent(path)}`),
+			writeFile: (tenantId: string, id: string, path: string, content: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/files/write`, { method: 'POST', body: JSON.stringify({ path, content }) }),
+			deleteFile: (tenantId: string, id: string, path: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/files/delete`, { method: 'POST', body: JSON.stringify({ path }) }),
+			createFolder: (tenantId: string, id: string, path: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/files/folder`, { method: 'POST', body: JSON.stringify({ path }) }),
+			renameFile: (tenantId: string, id: string, oldPath: string, newPath: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/files/rename`, { method: 'POST', body: JSON.stringify({ oldPath, newPath }) }),
+			copyFile: (tenantId: string, id: string, sourcePath: string, destinationPath: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/files/copy`, { method: 'POST', body: JSON.stringify({ sourcePath, destinationPath }) }),
+			compressFiles: (tenantId: string, id: string, sourcePaths: string[], archivePath: string, compression: string) => request<{ ok: boolean; message?: string }>(`api/tenants/${tenantId}/servers/${id}/files/compress`, { method: 'POST', body: JSON.stringify({ sourcePaths, archivePath, compression }) }),
+			decompressFile: (tenantId: string, id: string, archivePath: string, destinationPath: string) => request<{ ok: boolean; message?: string }>(`api/tenants/${tenantId}/servers/${id}/files/decompress`, { method: 'POST', body: JSON.stringify({ archivePath, destinationPath }) }),
+			chmodFile: (tenantId: string, id: string, path: string, permissions: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/files/chmod`, { method: 'POST', body: JSON.stringify({ path, permissions }) }),
+			chownFile: (tenantId: string, id: string, path: string, owner: string) => request<{ ok: boolean }>(`api/tenants/${tenantId}/servers/${id}/files/chown`, { method: 'POST', body: JSON.stringify({ path, owner }) }),
+			uploadFile: async (tenantId: string, id: string, path: string, file: File) => {
+				const formData = new FormData();
+				formData.append('path', path);
+				formData.append('file', file);
+				const token = getToken();
+				const response = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/tenants/${tenantId}/servers/${id}/files/upload`, {
+					method: 'POST',
+					body: formData,
+					headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+					credentials: 'include',
+				});
+				if (!response.ok) {
+					const error = await response.json().catch(() => ({ error: 'Upload failed' }));
+					throw new Error(error.error || 'Upload failed');
+				}
+				return response.json() as Promise<{ ok: boolean; message?: string; files?: string[] }>;
+			},
 		},
 		billing: {
 			getTenantBilling: (tenantId: string) => request<{ tenantId: string; billing: any; balance: any }>(`api/tenants/${tenantId}/billing`),

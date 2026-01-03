@@ -7,7 +7,9 @@
       "@/components/*": ["src/components/*"],
       "@/pages/*": ["src/pages/*"],
       "@/providers/*": ["src/providers/*"],
-      "@/utils/*": ["src/utils/*"]
+      "@/utils/*": ["src/utils/*"],
+      "@/state/*": ["src/state/*"],
+      "@/hooks/*": ["src/hooks/*"]
     }
   }
 }

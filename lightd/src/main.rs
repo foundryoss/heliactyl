@@ -5,8 +5,9 @@ use axum::{
     Router,
 };
 use clap::{Parser, Subcommand};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -33,9 +34,9 @@ use state_manager::StateManager;
 use config::Config;
 use docker::{DockerClient, NetworkManager};
 use types::AppState;
-use services::PowerActionService;
+use services::{PowerActionService, PowerExecutor, ContainerEventHub, AsyncPowerManager};
 
-async fn perform_daemon_recovery(docker: &DockerClient, state_manager: &mut StateManager) -> anyhow::Result<()> {
+async fn perform_daemon_recovery(docker: &DockerClient, state_manager: &StateManager) -> anyhow::Result<()> {
     info!("Starting daemon recovery process...");
 
     // Get all active Docker containers
@@ -50,7 +51,7 @@ async fn perform_daemon_recovery(docker: &DockerClient, state_manager: &mut Stat
         .filter_map(|c| c.id.as_ref().map(|id| id.clone()))
         .collect();
 
-    // Reconcile state with Docker
+    // Reconcile state with Docker (lock-free)
     state_manager.reconcile_with_docker(&active_container_ids).await?;
 
     // Get containers that should be recovered
@@ -115,16 +116,12 @@ enum Commands {
 enum NetworkCommands {
     /// Create the lightd network
     Create {
-        /// Network name (default: lightd-network)
         #[arg(short, long, default_value = "lightd-network")]
         name: String,
-        /// Network driver (default: bridge)
         #[arg(short, long, default_value = "bridge")]
         driver: String,
-        /// Network subnet (e.g., 172.20.0.0/16)
         #[arg(short, long)]
         subnet: Option<String>,
-        /// Network gateway (e.g., 172.20.0.1)
         #[arg(short, long)]
         gateway: Option<String>,
     },
@@ -132,33 +129,26 @@ enum NetworkCommands {
     List,
     /// Remove the lightd network
     Remove {
-        /// Network name to remove
         #[arg(short, long, default_value = "lightd-network")]
         name: String,
     },
     /// Check if lightd network exists
     Check {
-        /// Network name to check
         #[arg(short, long, default_value = "lightd-network")]
         name: String,
     },
-    /// Setup complete lightd networking (create network + configure)
+    /// Setup complete lightd networking
     Setup {
-        /// Network name (default: lightd-network)
         #[arg(short, long, default_value = "lightd-network")]
         name: String,
-        /// Network subnet (default: 172.20.0.0/16)
         #[arg(short, long, default_value = "172.20.0.0/16")]
         subnet: String,
-        /// Network gateway (default: 172.20.0.1)
         #[arg(short, long, default_value = "172.20.0.1")]
         gateway: String,
     },
 }
 
-
-
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -166,12 +156,10 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Network { network_cmd }) => {
-            // Handle network commands
             let config = Config::load("config.json").await?;
             execute_network_command(network_cmd, &config.docker.socket_path).await?;
         }
         Some(Commands::Serve) | None => {
-            // Start the daemon (default behavior)
             start_daemon().await?;
         }
     }
@@ -190,15 +178,9 @@ async fn execute_network_command(cmd: NetworkCommands, docker_socket: &str) -> a
         NetworkCommands::Create { name, driver, subnet, gateway } => {
             create_network(&docker, &name, &driver, subnet.as_deref(), gateway.as_deref()).await
         }
-        NetworkCommands::List => {
-            list_networks(&docker).await
-        }
-        NetworkCommands::Remove { name } => {
-            remove_network(&docker, &name).await
-        }
-        NetworkCommands::Check { name } => {
-            check_network(&docker, &name).await
-        }
+        NetworkCommands::List => list_networks(&docker).await,
+        NetworkCommands::Remove { name } => remove_network(&docker, &name).await,
+        NetworkCommands::Check { name } => check_network(&docker, &name).await,
         NetworkCommands::Setup { name, subnet, gateway } => {
             setup_network(&docker, &name, &subnet, &gateway).await
         }
@@ -212,7 +194,6 @@ async fn create_network(
     subnet: Option<&str>,
     gateway: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Check if network already exists
     if network_exists(docker, name).await? {
         info!("Network '{}' already exists", name);
         return Ok(());
@@ -246,12 +227,6 @@ async fn create_network(
     match docker.create_network(options).await {
         Ok(response) => {
             info!("Created network '{}' with ID: {}", name, response.id.unwrap_or_default());
-            if let Some(subnet) = subnet {
-                info!("   Subnet: {}", subnet);
-            }
-            if let Some(gateway) = gateway {
-                info!("   Gateway: {}", gateway);
-            }
             Ok(())
         }
         Err(e) => {
@@ -262,9 +237,7 @@ async fn create_network(
 }
 
 async fn list_networks(docker: &Docker) -> anyhow::Result<()> {
-    let options = ListNetworksOptions::<String> {
-        ..Default::default()
-    };
+    let options = ListNetworksOptions::<String>::default();
 
     match docker.list_networks(Some(options)).await {
         Ok(networks) => {
@@ -277,18 +250,11 @@ async fn list_networks(docker: &Docker) -> anyhow::Result<()> {
                 let driver = network.driver.unwrap_or_default();
                 let scope = network.scope.unwrap_or_default();
                 
-                let subnet = if let Some(ipam) = &network.ipam {
-                    if let Some(config) = &ipam.config {
-                        config.first()
-                            .and_then(|c| c.subnet.as_ref())
-                            .map(|s| s.to_string())
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
+                let subnet = network.ipam
+                    .and_then(|ipam| ipam.config)
+                    .and_then(|config| config.first().cloned())
+                    .and_then(|c| c.subnet)
+                    .unwrap_or_default();
 
                 println!("{:<20} {:<15} {:<15} {:<30}", name, driver, scope, subnet);
             }
@@ -330,33 +296,23 @@ async fn check_network(docker: &Docker, name: &str) -> anyhow::Result<()> {
 
 async fn setup_network(docker: &Docker, name: &str, subnet: &str, gateway: &str) -> anyhow::Result<()> {
     println!("Setting up lightd networking...");
-    
-    // Create the network
     create_network(docker, name, "bridge", Some(subnet), Some(gateway)).await?;
     
-    // Verify it was created
     if network_exists(docker, name).await? {
         println!("lightd network setup complete!");
         println!("   Network: {}", name);
         println!("   Subnet: {}", subnet);
         println!("   Gateway: {}", gateway);
-        println!("\nYou can now create containers that will use this network automatically.");
-    } else {
-        tracing::error!("Network setup failed - network not found after creation");
     }
     
     Ok(())
 }
 
 async fn network_exists(docker: &Docker, name: &str) -> anyhow::Result<bool> {
-    let options = ListNetworksOptions::<String> {
-        ..Default::default()
-    };
+    let options = ListNetworksOptions::<String>::default();
 
     match docker.list_networks(Some(options)).await {
-        Ok(networks) => {
-            Ok(networks.iter().any(|n| n.name.as_ref() == Some(&name.to_string())))
-        }
+        Ok(networks) => Ok(networks.iter().any(|n| n.name.as_ref() == Some(&name.to_string()))),
         Err(e) => {
             tracing::error!("Failed to check if network exists: {}", e);
             Err(e.into())
@@ -365,19 +321,18 @@ async fn network_exists(docker: &Docker, name: &str) -> anyhow::Result<bool> {
 }
 
 async fn start_daemon() -> anyhow::Result<()> {
-
     let config = Config::load("config.json").await?;
+    
+    info!("Tokio runtime configured with {} worker threads", config.server.worker_threads);
+    
     let docker = DockerClient::new(&config.docker.socket_path).await?;
     
-    // Get network config from the loaded config
     let network_config = config.network.as_ref()
         .ok_or_else(|| anyhow::anyhow!("Network configuration not loaded"))?;
     
-    // Use network config for port range and create network manager with storage
     let mut network = NetworkManager::with_config(Arc::new(network_config.clone()))
         .with_storage(&config.storage.base_path);
 
-    // Initialize container tracker with configurable path
     let container_tracker = ContainerTrackingManager::new(&config.storage.containers_path);
     container_tracker.init().await?;
 
@@ -386,12 +341,15 @@ async fn start_daemon() -> anyhow::Result<()> {
         network.restore_from_containers(&containers);
     }
 
-    // Initialize state manager
+    // Initialize lock-free state manager
     let mut state_manager = StateManager::new(&config.storage.base_path);
     state_manager.init().await?;
 
     // Perform daemon recovery
-    perform_daemon_recovery(&docker, &mut state_manager).await?;
+    perform_daemon_recovery(&docker, &state_manager).await?;
+
+    // Wrap in Arc (no RwLock needed - StateManager is internally lock-free)
+    let state_manager = Arc::new(state_manager);
 
     // Initialize resource monitor if enabled
     let resource_monitor = if config.monitoring.as_ref().map(|m| m.enabled).unwrap_or(true) {
@@ -405,15 +363,13 @@ async fn start_daemon() -> anyhow::Result<()> {
             base_ru: monitoring_config.ru_config.base_ru,
         };
         
-        let state_manager_arc = Arc::new(Mutex::new(state_manager));
         let monitor = Arc::new(crate::monitoring::ResourceMonitor::new(
             Arc::new(docker.client.clone()),
-            Arc::clone(&state_manager_arc),
+            state_manager.clone(),
             ru_config,
             monitoring_config.interval_ms,
         ).with_remote(monitoring_config.remote.clone()));
         
-        // Log remote config status
         if let Some(ref remote) = monitoring_config.remote {
             if remote.enabled {
                 info!("Remote panel RU posting enabled: {}", remote.url);
@@ -429,43 +385,117 @@ async fn start_daemon() -> anyhow::Result<()> {
         });
         
         info!("Resource monitoring started with interval: {}ms", monitoring_config.interval_ms);
-        
-        (Some(monitor), state_manager_arc)
+        Some(monitor)
     } else {
         info!("Resource monitoring is disabled");
-        (None, Arc::new(Mutex::new(state_manager)))
+        None
     };
+    
+    // Start background state save task
+    {
+        let state_manager_for_save = state_manager.clone();
+        let (dirty, _notify, path) = state_manager_for_save.get_save_handles();
+        
+        tokio::spawn(async move {
+            info!("Background state save task started");
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            
+            loop {
+                interval.tick().await;
+                
+                // Check if dirty and save
+                if dirty.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    let state = state_manager_for_save.get_state_snapshot();
+                    let content = serde_json::to_string_pretty(&state).unwrap_or_default();
+                    if let Err(e) = tokio::fs::write(&path, content).await {
+                        tracing::error!("Failed to save state: {}", e);
+                    }
+                }
+            }
+        });
+    }
 
     // Initialize WebSocket token manager
     let websocket_tokens = Arc::new(crate::websocket::TokenManager::new());
     
-    // Start token cleanup task
     let token_manager_clone = websocket_tokens.clone();
     tokio::spawn(async move {
         token_manager_clone.start_cleanup_task().await;
     });
 
-    // Initialize PowerActionService for non-blocking container operations
+    // Initialize services
     let docker_arc = Arc::new(docker);
     let container_tracker_arc = Arc::new(container_tracker);
+    
     let power_actions = Arc::new(PowerActionService::new(
         Arc::new(docker_arc.client.clone()),
-        resource_monitor.1.clone(),
+        state_manager.clone(),
         container_tracker_arc.clone(),
     ));
     
-    info!("Power action service initialized for non-blocking container operations");
+    // Initialize PowerExecutor with state update callback
+    let state_manager_for_callback = state_manager.clone();
+    let tracker_for_callback = container_tracker_arc.clone();
+    
+    let state_callback: services::power_executor::StateCallback = Arc::new(move |uuid, action, status| {
+        let new_state = match (action.as_str(), status.as_str()) {
+            ("start", "completed") => Some("running"),
+            ("start", "failed") => Some("stopped"),
+            ("stop", "completed") => Some("stopped"),
+            ("stop", "failed") => Some("stopped"),
+            ("kill", "completed") => Some("stopped"),
+            ("kill", "failed") => Some("stopped"),
+            ("restart", "completed") => Some("running"),
+            ("restart", "failed") => Some("stopped"),
+            ("suspend", "completed") => Some("suspended"),
+            ("suspend", "failed") => Some("stopped"),
+            _ => None,
+        };
+        
+        if let Some(state) = new_state {
+            let sm = state_manager_for_callback.clone();
+            let tracker = tracker_for_callback.clone();
+            let uuid_clone = uuid.clone();
+            let state_str = state.to_string();
+            
+            // Spawn update task - never blocks the callback
+            tokio::spawn(async move {
+                let _ = sm.update_container_state(&uuid_clone, &state_str).await;
+                let _ = tracker.update_container_status(&uuid_clone, &state_str).await;
+            });
+        }
+    });
+    
+    let power_executor = Arc::new(PowerExecutor::new(
+        config.docker.socket_path.clone(),
+        state_callback,
+    ));
+    
+    info!("Power executor initialized on dedicated thread");
+
+    // Initialize event hub and async power manager
+    let event_hub = Arc::new(ContainerEventHub::new());
+    
+    let async_power = Arc::new(AsyncPowerManager::new(
+        Arc::new(docker_arc.client.clone()),
+        event_hub.clone(),
+    ));
+    
+    info!("Container event hub and async power manager initialized");
 
     let state = AppState {
         docker: docker_arc,
         config: Arc::new(config.clone()),
-        network: Arc::new(Mutex::new(network)),
+        network: Arc::new(RwLock::new(network)),
         network_config: Arc::new(network_config.clone()),
         container_tracker: container_tracker_arc,
-        state_manager: resource_monitor.1,
-        resource_monitor: resource_monitor.0,
+        state_manager,
+        resource_monitor,
         websocket_tokens,
         power_actions,
+        power_executor,
+        event_hub,
+        async_power,
     };
 
     let app = Router::new()
@@ -494,12 +524,9 @@ async fn start_daemon() -> anyhow::Result<()> {
         .route("/containers/uuid/:uuid/restart", post(handlers::container::restart_container_by_uuid))
         .route("/containers/uuid/:uuid/suspend", post(handlers::container::suspend_container_by_uuid))
         .route("/containers/uuid/:uuid/unsuspend", post(handlers::container::unsuspend_container_by_uuid))
-        // Power action status
         .route("/power-actions/:action_id", get(handlers::container::get_power_action_status))
-        // WebSocket routes
         .route("/websocket/generate", get(handlers::websocket::generate_websocket_token))
         .route("/websocket", get(handlers::websocket::websocket_handler))
-        // Filesystem routes
         .route("/containers/:id/files", get(handlers::filesystem::list_directory))
         .route("/containers/:id/files/content/*path", get(handlers::filesystem::get_file_content))
         .route("/containers/:id/files/write", post(handlers::filesystem::write_file))
@@ -512,7 +539,7 @@ async fn start_daemon() -> anyhow::Result<()> {
         .route("/containers/:id/files/zip", post(handlers::filesystem::create_zip))
         .route("/containers/:id/files/unzip", post(handlers::filesystem::extract_zip))
         .route("/containers/:id/files/copy", post(handlers::filesystem::copy_file))
-        // Monitoring routes
+        .route("/containers/:id/files/upload", post(handlers::filesystem::upload_file))
         .route("/monitoring/system", get(handlers::monitoring::get_system_metrics))
         .route("/monitoring/system/history", get(handlers::monitoring::get_system_metrics_history))
         .route("/monitoring/containers/:id", get(handlers::monitoring::get_container_metrics))
@@ -521,7 +548,6 @@ async fn start_daemon() -> anyhow::Result<()> {
         .route("/monitoring/ru/containers/:id", get(handlers::monitoring::get_container_ru_breakdown))
         .route("/monitoring/ru/config", get(handlers::monitoring::get_ru_config))
         .route("/monitoring/ru/estimate", post(handlers::monitoring::calculate_ru_estimate))
-        // Snapshot routes
         .route("/snapshots", get(handlers::snapshot::list_snapshots))
         .route("/snapshots/:id", get(handlers::snapshot::get_snapshot_info))
         .route("/snapshots/:id", delete(handlers::snapshot::delete_snapshot))

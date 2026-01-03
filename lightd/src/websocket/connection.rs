@@ -178,13 +178,10 @@ impl WebSocketConnection {
 
         let (mut tx, mut rx) = self.socket.split();
 
-        // Get current container status
-        let current_status = {
-            let sm = self.state.state_manager.lock().await;
-            sm.get_container(&container_uuid)
-                .map(|cs| cs.state.clone())
-                .unwrap_or_else(|| "offline".to_string())
-        };
+        // Get current container status (lock-free)
+        let current_status = self.state.state_manager.get_container(&container_uuid)
+            .map(|cs| cs.state.clone())
+            .unwrap_or_else(|| "offline".to_string());
 
         // Send init message
         let init_msg = WsMessage::init(&container_id, &container_uuid, &current_status);
@@ -416,12 +413,19 @@ impl WebSocketConnection {
                                     disk_bytes,
                                 };
                                 
-                                if let Ok(stats_json) = serde_json::to_string(&container_stats) {
-                                    let msg = WsMessage::stats(&stats_json).to_json();
-                                    if tx.send(Message::Text(msg)).await.is_err() {
-                                        debug!("Client disconnected while sending stats");
-                                        return;
-                                    }
+                                let msg = WsMessage::stats(
+                                    container_stats.memory_bytes,
+                                    container_stats.memory_limit_bytes,
+                                    container_stats.cpu_absolute,
+                                    container_stats.network.rx_bytes,
+                                    container_stats.network.tx_bytes,
+                                    container_stats.uptime,
+                                    &container_stats.state,
+                                    container_stats.disk_bytes,
+                                ).to_json();
+                                if tx.send(Message::Text(msg)).await.is_err() {
+                                    debug!("Client disconnected while sending stats");
+                                    return;
                                 }
                             }
                             Err(e) => {

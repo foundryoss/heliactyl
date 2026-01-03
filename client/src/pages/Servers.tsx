@@ -9,7 +9,9 @@ import { Modal } from '@/components/ui/Modal'
 import Spinner from '@/components/ui/Spinner'
 import { TrashIcon, CommandLineIcon, PlusIcon } from '@heroicons/react/24/outline'
 import { useAlert } from '@/components/ui/Alert'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import gsap from 'gsap'
+import LoadingAnimation from '@/components/loaders'
 
 // Strip ANSI escape codes from log output
 function stripAnsi(text: string): string {
@@ -214,35 +216,41 @@ export function ServersPage() {
     const { selectedTenantId } = useTenants()
     const { notify } = useAlert()
     const navigate = useNavigate()
+    const queryClient = useQueryClient()
     
     // Live updates via MQTT
     const liveUpdates = useTenantUpdates(selectedTenantId)
     
-    const [servers, setServers] = useState<any[]>([])
-    const [error, setError] = useState<string | null>(null)
-    const [loading, setLoading] = useState(false)
     const [showDeleteModal, setShowDeleteModal] = useState(false)
     const [serverToDelete, setServerToDelete] = useState<any>(null)
-    const [deleting, setDeleting] = useState(false)
 
-    const loadData = useCallback(async () => {
-        if (!selectedTenantId) return
-        setLoading(true)
-        setError(null)
-        
-        try {
+    // Fetch servers using TanStack Query
+    const { data: servers = [], isLoading: loading, error } = useQuery({
+        queryKey: ['servers', selectedTenantId],
+        queryFn: async () => {
+            if (!selectedTenantId) return []
             const serversRes = await api.servers.list(selectedTenantId)
-            setServers(serversRes.items || [])
-        } catch (e: any) {
-            setError(e?.message || 'Failed to load data')
-        } finally {
-            setLoading(false)
-        }
-    }, [api, selectedTenantId])
+            return serversRes.items || []
+        },
+        enabled: !!selectedTenantId,
+    })
 
-    useEffect(() => {
-        loadData()
-    }, [loadData])
+    // Delete server mutation
+    const deleteMutation = useMutation({
+        mutationFn: async (serverId: string) => {
+            if (!selectedTenantId) throw new Error('No tenant selected')
+            await api.servers.delete(selectedTenantId, serverId)
+        },
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['servers', selectedTenantId] })
+            notify({ type: 'success', description: 'Server deleted successfully' })
+            setShowDeleteModal(false)
+            setServerToDelete(null)
+        },
+        onError: (e: any) => {
+            notify({ type: 'error', description: e?.message || 'Failed to delete server' })
+        },
+    })
 
     // Handle live updates
     useEffect(() => {
@@ -256,7 +264,7 @@ export function ServersPage() {
                     type: 'success', 
                     description: `Server "${latestUpdate.data.name}" was created`
                 })
-                loadData()
+                queryClient.invalidateQueries({ queryKey: ['servers', selectedTenantId] })
                 break
                 
             case 'server_deleted':
@@ -264,7 +272,7 @@ export function ServersPage() {
                     type: 'info', 
                     description: `A server was deleted`
                 })
-                loadData()
+                queryClient.invalidateQueries({ queryKey: ['servers', selectedTenantId] })
                 break
                 
             case 'member_added':
@@ -275,7 +283,7 @@ export function ServersPage() {
                 })
                 break
         }
-    }, [liveUpdates, notify, loadData])
+    }, [liveUpdates, notify, queryClient, selectedTenantId])
 
     const handleDeleteClick = (server: any) => {
         setServerToDelete(server)
@@ -283,20 +291,8 @@ export function ServersPage() {
     }
 
     const handleDeleteConfirm = async () => {
-        if (!selectedTenantId || !serverToDelete) return
-        
-        setDeleting(true)
-        try {
-            await api.servers.delete(selectedTenantId, serverToDelete.id)
-            notify({ type: 'success', description: 'Server deleted successfully' })
-            setShowDeleteModal(false)
-            setServerToDelete(null)
-            loadData()
-        } catch (e: any) {
-            notify({ type: 'error', description: e?.message || 'Failed to delete server' })
-        } finally {
-            setDeleting(false)
-        }
+        if (!serverToDelete) return
+        deleteMutation.mutate(serverToDelete.id)
     }
 
     if (!selectedTenantId) return (
@@ -308,13 +304,13 @@ export function ServersPage() {
     )
 
     if (loading) return (
-        <div className="flex items-center justify-center py-12"><Spinner size="lg" /></div>
+        <div className="flex items-center justify-center py-12"><LoadingAnimation /></div>
     )
 
     if (error) return (
         <div className="bg-neutral-100 dark:bg-neutral-900/30 border border-neutral-300 dark:border-neutral-800/50 p-6">
             <p className="text-sm text-red-600 dark:text-red-500" style={{ fontFamily: "'Space Mono', monospace" }}>
-                {error}
+                {(error as any)?.message || 'Failed to load data'}
             </p>
         </div>
     )
@@ -388,14 +384,14 @@ export function ServersPage() {
                             type="button"
                             variant="ghost"
                             onClick={() => setShowDeleteModal(false)}
-                            disabled={deleting}
+                            disabled={deleteMutation.isPending}
                             className="border-0"
                         >
                             Cancel
                         </Button>
                         <Button 
                             onClick={handleDeleteConfirm}
-                            isLoading={deleting}
+                            isLoading={deleteMutation.isPending}
                             className="bg-red-600 hover:bg-red-700 text-white border-transparent"
                         >
                             Delete Server

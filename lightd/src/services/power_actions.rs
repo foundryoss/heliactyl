@@ -2,15 +2,18 @@
 //! 
 //! This service ensures that container start/stop/kill/restart operations don't
 //! block the main HTTP server, even when containers are CPU-intensive or unresponsive.
+//! 
+//! Now uses lock-free StateManager for zero blocking on state updates.
 
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio::sync::{RwLock, oneshot};
 use tokio::time::timeout;
 use tracing::{info, warn, error};
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
+use dashmap::DashMap;
 
 use crate::docker::ContainerManager;
 use crate::state_manager::StateManager;
@@ -73,15 +76,10 @@ struct InFlightAction {
 /// Configuration for power action timeouts
 #[derive(Debug, Clone)]
 pub struct PowerActionConfig {
-    /// Timeout for graceful stop (SIGTERM) - default 10s
     pub stop_timeout: Duration,
-    /// Timeout for force kill (SIGKILL) - default 5s  
     pub kill_timeout: Duration,
-    /// Timeout for start operation - default 30s
     pub start_timeout: Duration,
-    /// Timeout for restart operation - default 45s
     pub restart_timeout: Duration,
-    /// How long to keep completed actions in history
     pub history_retention: Duration,
 }
 
@@ -92,27 +90,28 @@ impl Default for PowerActionConfig {
             kill_timeout: Duration::from_secs(5),
             start_timeout: Duration::from_secs(30),
             restart_timeout: Duration::from_secs(45),
-            history_retention: Duration::from_secs(300), // 5 minutes
+            history_retention: Duration::from_secs(300),
         }
     }
 }
 
 /// Service for handling power actions in background tasks
+/// Uses lock-free data structures for maximum concurrency
 pub struct PowerActionService {
     docker: Arc<bollard::Docker>,
-    state_manager: Arc<Mutex<StateManager>>,
+    state_manager: Arc<StateManager>,
     container_tracker: Arc<ContainerTrackingManager>,
     config: PowerActionConfig,
-    /// Track in-flight and recently completed actions
-    actions: Arc<RwLock<HashMap<String, InFlightAction>>>,
-    /// Track actions per container to prevent duplicate concurrent actions
-    container_locks: Arc<RwLock<HashMap<String, String>>>, // container_id -> action_id
+    /// Lock-free action tracking
+    actions: Arc<DashMap<String, InFlightAction>>,
+    /// Lock-free container locks
+    container_locks: Arc<DashMap<String, String>>,
 }
 
 impl PowerActionService {
     pub fn new(
         docker: Arc<bollard::Docker>,
-        state_manager: Arc<Mutex<StateManager>>,
+        state_manager: Arc<StateManager>,
         container_tracker: Arc<ContainerTrackingManager>,
     ) -> Self {
         Self::with_config(docker, state_manager, container_tracker, PowerActionConfig::default())
@@ -120,7 +119,7 @@ impl PowerActionService {
 
     pub fn with_config(
         docker: Arc<bollard::Docker>,
-        state_manager: Arc<Mutex<StateManager>>,
+        state_manager: Arc<StateManager>,
         container_tracker: Arc<ContainerTrackingManager>,
         config: PowerActionConfig,
     ) -> Self {
@@ -129,17 +128,14 @@ impl PowerActionService {
             state_manager,
             container_tracker,
             config,
-            actions: Arc::new(RwLock::new(HashMap::new())),
-            container_locks: Arc::new(RwLock::new(HashMap::new())),
+            actions: Arc::new(DashMap::new()),
+            container_locks: Arc::new(DashMap::new()),
         };
         
-        // Start background cleanup task
         service.start_cleanup_task();
-        
         service
     }
 
-    /// Start a cleanup task that removes old completed actions
     fn start_cleanup_task(&self) {
         let actions = self.actions.clone();
         let retention = self.config.history_retention;
@@ -150,44 +146,38 @@ impl PowerActionService {
                 interval.tick().await;
                 
                 let now = Utc::now();
-                let mut actions_guard = actions.write().await;
-                
-                actions_guard.retain(|_, action| {
+                actions.retain(|_, action| {
                     match action.result.status {
                         ActionStatus::Completed | ActionStatus::Failed | ActionStatus::TimedOut => {
                             if let Some(completed_at) = action.result.completed_at {
                                 let age = now.signed_duration_since(completed_at);
                                 age.num_seconds() < retention.as_secs() as i64
                             } else {
-                                true // Keep if no completion time (shouldn't happen)
+                                true
                             }
                         }
-                        _ => true, // Keep pending/running actions
+                        _ => true,
                     }
                 });
             }
         });
     }
 
-    /// Generate a unique action ID
     fn generate_action_id() -> String {
         uuid::Uuid::new_v4().to_string()
     }
 
-    /// Check if a container has an action in progress
-    pub async fn has_pending_action(&self, container_id: &str) -> Option<String> {
-        let locks = self.container_locks.read().await;
-        locks.get(container_id).cloned()
+    /// Check if a container has an action in progress (lock-free)
+    pub fn has_pending_action(&self, container_id: &str) -> Option<String> {
+        self.container_locks.get(container_id).map(|r| r.value().clone())
     }
 
-    /// Get the status of an action
-    pub async fn get_action_status(&self, action_id: &str) -> Option<PowerActionResult> {
-        let actions = self.actions.read().await;
-        actions.get(action_id).map(|a| a.result.clone())
+    /// Get the status of an action (lock-free)
+    pub fn get_action_status(&self, action_id: &str) -> Option<PowerActionResult> {
+        self.actions.get(action_id).map(|a| a.result.clone())
     }
 
-    /// Execute a power action in the background
-    /// Returns immediately with an action_id that can be used to check status
+    /// Execute a power action in the background (non-blocking)
     pub async fn execute_action(
         &self,
         container_id: String,
@@ -195,21 +185,17 @@ impl PowerActionService {
         action: PowerAction,
         reason: Option<String>,
     ) -> Result<PowerActionResult, String> {
-        // Check if there's already an action in progress for this container
-        {
-            let locks = self.container_locks.read().await;
-            if let Some(existing_action_id) = locks.get(&container_id) {
-                return Err(format!(
-                    "Container {} already has action in progress: {}",
-                    container_id, existing_action_id
-                ));
-            }
+        // Check for existing action (lock-free)
+        if let Some(existing) = self.container_locks.get(&container_id) {
+            return Err(format!(
+                "Container {} already has action in progress: {}",
+                container_id, existing.value()
+            ));
         }
 
         let action_id = Self::generate_action_id();
         let now = Utc::now();
 
-        // Create initial result
         let result = PowerActionResult {
             action_id: action_id.clone(),
             container_id: container_id.clone(),
@@ -221,25 +207,18 @@ impl PowerActionService {
             completed_at: None,
         };
 
-        // Create cancellation channel
         let (cancel_tx, cancel_rx) = oneshot::channel();
 
-        // Register the action
-        {
-            let mut actions = self.actions.write().await;
-            actions.insert(action_id.clone(), InFlightAction {
-                result: result.clone(),
-                cancel_tx: Some(cancel_tx),
-            });
-        }
+        // Register action (lock-free)
+        self.actions.insert(action_id.clone(), InFlightAction {
+            result: result.clone(),
+            cancel_tx: Some(cancel_tx),
+        });
 
-        // Lock the container
-        {
-            let mut locks = self.container_locks.write().await;
-            locks.insert(container_id.clone(), action_id.clone());
-        }
+        // Lock container (lock-free)
+        self.container_locks.insert(container_id.clone(), action_id.clone());
 
-        // Spawn the background task
+        // Spawn background task
         let docker = self.docker.clone();
         let state_manager = self.state_manager.clone();
         let container_tracker = self.container_tracker.clone();
@@ -252,17 +231,13 @@ impl PowerActionService {
 
         tokio::spawn(async move {
             // Update status to running
-            {
-                let mut actions_guard = actions.write().await;
-                if let Some(action) = actions_guard.get_mut(&action_id_clone) {
-                    action.result.status = ActionStatus::Running;
-                }
+            if let Some(mut action) = actions.get_mut(&action_id_clone) {
+                action.result.status = ActionStatus::Running;
             }
 
             info!("Executing power action {} on container {} ({})", 
                   action, container_id_clone, container_uuid_clone);
 
-            // Execute the action with timeout
             let execution_result = Self::execute_action_internal(
                 &docker,
                 &container_id_clone,
@@ -272,7 +247,6 @@ impl PowerActionService {
                 reason,
             ).await;
 
-            // Update the final status
             let (final_status, message) = match execution_result {
                 Ok(msg) => {
                     info!("Power action {} completed for container {}: {}", 
@@ -292,11 +266,11 @@ impl PowerActionService {
                 }
             };
 
-            // Update state manager and tracker
+            // Update state (lock-free operations)
             let new_state = match (action, &final_status) {
                 (PowerAction::Start, ActionStatus::Completed) => Some("running"),
                 (PowerAction::Stop, ActionStatus::Completed) => Some("stopped"),
-                (PowerAction::Stop, ActionStatus::TimedOut) => Some("stopped"), // Force killed
+                (PowerAction::Stop, ActionStatus::TimedOut) => Some("stopped"),
                 (PowerAction::Kill, _) => Some("killed"),
                 (PowerAction::Restart, ActionStatus::Completed) => Some("running"),
                 (PowerAction::Suspend, ActionStatus::Completed) => Some("suspended"),
@@ -304,42 +278,25 @@ impl PowerActionService {
             };
 
             if let Some(state) = new_state {
-                // Update state manager
-                if let Err(e) = state_manager.lock().await
-                    .update_container_state(&container_uuid_clone, state).await 
-                {
-                    error!("Failed to update container state: {}", e);
-                }
-
-                // Update container tracker
-                if let Err(e) = container_tracker
-                    .update_container_status(&container_uuid_clone, state).await 
-                {
-                    error!("Failed to update container tracker: {}", e);
-                }
+                // These are lock-free operations
+                let _ = state_manager.update_container_state(&container_uuid_clone, state).await;
+                let _ = container_tracker.update_container_status(&container_uuid_clone, state).await;
             }
 
-            // Update action result
-            {
-                let mut actions_guard = actions.write().await;
-                if let Some(action_entry) = actions_guard.get_mut(&action_id_clone) {
-                    action_entry.result.status = final_status;
-                    action_entry.result.message = message;
-                    action_entry.result.completed_at = Some(Utc::now());
-                }
+            // Update action result (lock-free)
+            if let Some(mut action_entry) = actions.get_mut(&action_id_clone) {
+                action_entry.result.status = final_status;
+                action_entry.result.message = message;
+                action_entry.result.completed_at = Some(Utc::now());
             }
 
-            // Release container lock
-            {
-                let mut locks = container_locks.write().await;
-                locks.remove(&container_id_clone);
-            }
+            // Release container lock (lock-free)
+            container_locks.remove(&container_id_clone);
         });
 
         Ok(result)
     }
 
-    /// Internal execution with proper timeouts and force-kill fallback
     async fn execute_action_internal(
         docker: &bollard::Docker,
         container_id: &str,
@@ -348,7 +305,7 @@ impl PowerActionService {
         _cancel_rx: oneshot::Receiver<()>,
         reason: Option<String>,
     ) -> Result<String, String> {
-        let manager = ContainerManager::new(docker);
+        let manager = ContainerManager::new(docker.clone());
 
         match action {
             PowerAction::Start => {
@@ -360,17 +317,14 @@ impl PowerActionService {
             }
             
             PowerAction::Stop => {
-                // Try graceful stop first
                 info!("Attempting graceful stop for container {}", container_id);
                 match timeout(config.stop_timeout, manager.stop(container_id)).await {
                     Ok(Ok(_)) => Ok("Container stopped gracefully".to_string()),
                     Ok(Err(e)) => {
-                        // If stop fails, try force kill
                         warn!("Graceful stop failed for {}, attempting force kill: {}", container_id, e);
                         Self::force_kill(docker, container_id, config).await
                     }
                     Err(_) => {
-                        // Timeout - force kill
                         warn!("Graceful stop timed out for {}, force killing", container_id);
                         Self::force_kill(docker, container_id, config).await
                     }
@@ -386,18 +340,14 @@ impl PowerActionService {
             }
 
             PowerAction::Restart => {
-                // Stop first, then start
                 let stop_result = timeout(config.stop_timeout, manager.stop(container_id)).await;
                 
                 match stop_result {
                     Ok(Ok(_)) | Err(_) => {
-                        // Stopped or timed out - try to start anyway
                         if stop_result.is_err() {
-                            // Force kill if stop timed out
                             let _ = Self::force_kill(docker, container_id, config).await;
                         }
                         
-                        // Wait a moment for the container to fully stop
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         
                         match timeout(config.start_timeout, manager.start(container_id)).await {
@@ -406,8 +356,7 @@ impl PowerActionService {
                             Err(_) => Err("Start operation timed out during restart".to_string()),
                         }
                     }
-                    Ok(Err(e)) => {
-                        // Stop failed - try force kill then start
+                    Ok(Err(_e)) => {
                         let _ = Self::force_kill(docker, container_id, config).await;
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         
@@ -425,7 +374,6 @@ impl PowerActionService {
                 match timeout(config.kill_timeout, manager.suspend(container_id, Some(reason_msg.clone()))).await {
                     Ok(Ok(_)) => Ok(format!("Container suspended: {}", reason_msg)),
                     Ok(Err(e)) => {
-                        // If suspend fails, force kill
                         warn!("Suspend failed for {}, force killing: {}", container_id, e);
                         Self::force_kill(docker, container_id, config).await
                             .map(|_| format!("Container force-killed (suspend failed): {}", reason_msg))
@@ -440,7 +388,6 @@ impl PowerActionService {
         }
     }
 
-    /// Force kill a container using SIGKILL
     async fn force_kill(
         docker: &bollard::Docker,
         container_id: &str,
@@ -458,7 +405,6 @@ impl PowerActionService {
         match timeout(config.kill_timeout, kill_future).await {
             Ok(Ok(_)) => Ok("Container force killed with SIGKILL".to_string()),
             Ok(Err(e)) => {
-                // Container might already be dead
                 let error_str = e.to_string();
                 if error_str.contains("is not running") || error_str.contains("No such container") {
                     Ok("Container already stopped".to_string())

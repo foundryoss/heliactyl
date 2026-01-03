@@ -8,7 +8,7 @@ use bollard::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::models::{ContainerInfo, CreateContainerRequest, PortMapping, ResourceLimits};
@@ -145,7 +145,7 @@ impl ContainerManager {
     pub async fn create_with_networking(
         &self, 
         req: CreateContainerRequest, 
-        network_manager: &Arc<Mutex<NetworkManager>>, 
+        network_manager: &Arc<RwLock<NetworkManager>>, 
         container_uuid: &str,
         volumes_base_path: &str,
     ) -> anyhow::Result<(String, Vec<super::network::PortAllocation>)> {
@@ -170,7 +170,7 @@ impl ContainerManager {
         // Handle port allocation with HashMap format
         let allocated_ports = if let Some(ports) = &req.ports {
             // Use UUID for port allocation tracking instead of user-provided name
-            let mut net_mgr = network_manager.lock().await;
+            let mut net_mgr = network_manager.write().await;
             net_mgr.auto_allocate_ports(container_uuid, ports)
                 .map_err(|e| anyhow::anyhow!("Port allocation failed: {}", e))?
         } else {
@@ -1118,8 +1118,6 @@ impl ContainerManager {
         
         match self.client.start_exec(&exec.id, None).await? {
             StartExecResults::Attached { mut output, .. } => {
-                let mut result = String::new();
-                
                 // Collect output with timeout
                 let timeout_result = timeout(Duration::from_secs(timeout_secs), async {
                     let mut collected = String::new();
@@ -1141,7 +1139,7 @@ impl ContainerManager {
                     Ok(output) => Ok(output),
                     Err(_) => {
                         // Timeout occurred - command is still running
-                        Ok(format!("{}\n[Command still running in background after {}s timeout]", result, timeout_secs))
+                        Ok(format!("[Command still running in background after {}s timeout]", timeout_secs))
                     }
                 }
             }

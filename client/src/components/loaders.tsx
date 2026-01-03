@@ -2,7 +2,7 @@ import React from 'react';
 
 const LoadingAnimation = () => {
   return (
-    <div className="flex items-center justify-center min-h-screen">
+   
       <div className="relative w-32 h-32">
         <svg 
           xmlns="http://www.w3.org/2000/svg" 
@@ -33,8 +33,9 @@ const LoadingAnimation = () => {
             </mask>
           </defs>
           
-          {/* Background */}
+          {/* Background 
           <rect x="-37.5" width="450" y="-37.499999" height="449.999989" fill="#000000"/>
+          */}
           
           {/* Static outline */}
           <g clipPath="url(#clip)" opacity="0.15">
@@ -50,7 +51,7 @@ const LoadingAnimation = () => {
           />
         </svg>
       </div>
-    </div>
+    
   );
 };
 

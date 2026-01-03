@@ -6,6 +6,7 @@ import { useAlert } from '@/components/ui/Alert'
 import Spinner from '@/components/ui/Spinner'
 import { Button } from '@/components/ui/Button'
 import { Select } from '@/components/ui/Select'
+import LoadingAnimation from '@/components/loaders'
 
 interface TenantAuditLog {
     id: string
@@ -470,7 +471,7 @@ export function DashboardPage() {
                         <div className="bg-neutral-50 dark:bg-neutral-900/50 border border-neutral-300 dark:border-neutral-800/50 overflow-hidden">
                             {auditLoading && tenantAudit.length === 0 ? (
                                 <div className="p-8 flex items-center justify-center">
-                                    <Spinner size="lg" />
+                                    <LoadingAnimation />
                                 </div>
                             ) : displayedAudit.length === 0 ? (
                                 <div className="p-8 text-center">

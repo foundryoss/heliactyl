@@ -168,11 +168,14 @@ impl DaemonClient {
         
         tracing::debug!("Getting container by UUID: {}", url);
         
-        let response = self.client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {}", e))?;
+        // Add timeout to prevent hanging
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.client.get(&url).send()
+        )
+        .await
+        .map_err(|_| "Request timeout after 5 seconds".to_string())?
+        .map_err(|e| format!("Request failed: {}", e))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -432,6 +435,260 @@ impl DaemonClient {
             is_running: data["is_running"].as_bool().unwrap_or(false),
         })
     }
+
+    /// List files in container directory
+    pub async fn list_files(&self, container_id: &str, path: &str) -> Result<serde_json::Value, String> {
+        let url = format!("{}/containers/{}/files?path={}", 
+            self.base_url, container_id, urlencoding::encode(path));
+        
+        let response = self.client.get(&url).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to list files: {}", error_text));
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        
+        Ok(json)
+    }
+
+    /// Read file content from container
+    pub async fn read_file(&self, container_id: &str, path: &str) -> Result<String, String> {
+        let url = format!("{}/containers/{}/files/content{}", 
+            self.base_url, container_id, path);
+        
+        let response = self.client.get(&url).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to read file: {}", error_text));
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        
+        let content = json["data"].as_str().unwrap_or("").to_string();
+        Ok(content)
+    }
+
+    /// Write file content to container
+    pub async fn write_file(&self, container_id: &str, path: &str, content: &str) -> Result<(), String> {
+        let url = format!("{}/containers/{}/files/write", self.base_url, container_id);
+        
+        let body = serde_json::json!({
+            "path": path,
+            "content": content
+        });
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to write file: {}", error_text));
+        }
+        
+        Ok(())
+    }
+
+    /// Delete file or directory from container
+    pub async fn delete_file(&self, container_id: &str, path: &str) -> Result<(), String> {
+        let url = format!("{}/containers/{}/files/delete", self.base_url, container_id);
+        
+        let body = serde_json::json!({
+            "path": path
+        });
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to delete: {}", error_text));
+        }
+        
+        Ok(())
+    }
+
+    /// Create directory in container
+    pub async fn create_folder(&self, container_id: &str, path: &str) -> Result<(), String> {
+        let url = format!("{}/containers/{}/files/mkdir", self.base_url, container_id);
+        
+        let body = serde_json::json!({
+            "path": path
+        });
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to create folder: {}", error_text));
+        }
+        
+        Ok(())
+    }
+
+    /// Rename/move file in container
+    pub async fn rename_file(&self, container_id: &str, old_path: &str, new_path: &str) -> Result<(), String> {
+        let url = format!("{}/containers/{}/files/copy", self.base_url, container_id);
+        
+        let body = serde_json::json!({
+            "source_path": old_path,
+            "destination_path": new_path,
+            "move_file": true
+        });
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to rename: {}", error_text));
+        }
+        
+        Ok(())
+    }
+
+    /// Copy file in container
+    pub async fn copy_file(&self, container_id: &str, source_path: &str, destination_path: &str) -> Result<(), String> {
+        let url = format!("{}/containers/{}/files/copy", self.base_url, container_id);
+        
+        let body = serde_json::json!({
+            "source_path": source_path,
+            "destination_path": destination_path,
+            "move_file": false
+        });
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to copy: {}", error_text));
+        }
+        
+        Ok(())
+    }
+
+    /// Compress files into archive
+    pub async fn compress_files(&self, container_id: &str, source_paths: &[String], archive_path: &str, compression: &str) -> Result<String, String> {
+        let url = format!("{}/containers/{}/files/archive", self.base_url, container_id);
+        
+        let body = serde_json::json!({
+            "source_paths": source_paths,
+            "archive_path": archive_path,
+            "compression": compression
+        });
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to compress: {}", error_text));
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        
+        let message = json["data"].as_str().unwrap_or("Archive created successfully").to_string();
+        Ok(message)
+    }
+
+    /// Extract archive
+    pub async fn extract_archive(&self, container_id: &str, archive_path: &str, destination_path: &str) -> Result<String, String> {
+        let url = format!("{}/containers/{}/files/extract", self.base_url, container_id);
+        
+        let body = serde_json::json!({
+            "archive_path": archive_path,
+            "destination_path": destination_path
+        });
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to extract: {}", error_text));
+        }
+
+        let json: serde_json::Value = response.json().await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        
+        let message = json["data"].as_str().unwrap_or("Archive extracted successfully").to_string();
+        Ok(message)
+    }
+
+    /// Change file permissions
+    pub async fn chmod(&self, container_id: &str, path: &str, permissions: &str) -> Result<(), String> {
+        let url = format!("{}/containers/{}/files/chmod", self.base_url, container_id);
+        
+        let body = serde_json::json!({
+            "path": path,
+            "permissions": permissions
+        });
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to chmod: {}", error_text));
+        }
+        
+        Ok(())
+    }
+
+    /// Change file ownership
+    pub async fn chown(&self, container_id: &str, path: &str, owner: &str) -> Result<(), String> {
+        let url = format!("{}/containers/{}/files/chown", self.base_url, container_id);
+        
+        let body = serde_json::json!({
+            "path": path,
+            "owner": owner
+        });
+        
+        let response = self.client.post(&url).json(&body).send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to chown: {}", error_text));
+        }
+        
+        Ok(())
+    }
+
+    /// Upload file to container via multipart
+    pub async fn upload_file(&self, container_id: &str, path: &str, data: &[u8]) -> Result<(), String> {
+        let url = format!("{}/containers/{}/files/upload", self.base_url, container_id);
+        
+        // Create multipart form
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name(path.split('/').last().unwrap_or("file").to_string());
+        
+        let form = reqwest::multipart::Form::new()
+            .text("path", path.rsplit_once('/').map(|(p, _)| p).unwrap_or("/").to_string())
+            .part("file", part);
+        
+        let response = self.client.post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to upload: {}", error_text));
+        }
+        
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -463,3 +720,6 @@ pub struct ContainerMetrics {
     pub memory_percent: f64,
     pub is_running: bool,
 }
+
+
+// Add urlencoding dependency for path encoding

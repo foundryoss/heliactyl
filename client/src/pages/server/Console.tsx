@@ -6,57 +6,58 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import Spinner from '@/components/ui/Spinner'
-import { useAlert } from '@/components/ui/Alert'
-import { ArrowLeftIcon } from '@heroicons/react/24/outline'
+import { PlayIcon, StopIcon, ArrowPathIcon, BoltIcon } from '@heroicons/react/24/outline'
+import { AreaChart, Area, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { ServerNavigation } from '@/components/ServerNavigation'
+import { useServerStore } from '@/state/server'
+import { useServerWebSocket } from '@/hooks/useServerWebSocket'
+import { useServerPower } from '@/hooks/useServerPower'
+import { useServer } from '@/hooks/useServer'
+import LoadingAnimation from '@/components/loaders'
 
-interface LogLine {
-    id: number
-    text: string
-    type: 'stdout' | 'info' | 'error' | 'success' | 'status'
-    timestamp: Date
-}
+interface LogLine { id: number; text: string; type: 'stdout' | 'info' | 'error' | 'success' | 'status'; timestamp: Date }
 
-interface ServerStats {
-    memory_bytes: number
-    memory_limit_bytes: number
-    cpu_absolute: number
-    network: { rx_bytes: number; tx_bytes: number }
-    state: string
-    disk_bytes: number
-}
-
-// Resource bar component (same as Dashboard)
-function ResourceBar({ label, used, total, unit }: { label: string; used: number; total: number; unit: string }) {
-    const percent = total > 0 ? Math.round((used / total) * 100) : 0
-    const barSegments = 10
-    const filledSegments = Math.round((percent / 100) * barSegments)
-    
+// Resource card with big Seven Segment display
+function ResourceCard({ label, value, unit, subValue, color = 'text-red-500' }: { 
+    label: string; value: string | number; unit: string; subValue?: string; color?: string 
+}) {
     return (
-        <div className="space-y-1">
-            <div className="flex items-center justify-between">
-                <span className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
-                    {label}
+        <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-4 md:p-6">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-600 dark:text-neutral-500 mb-2" style={{ fontFamily: "'Space Mono', monospace" }}>
+                {label}
+            </div>
+            <div className="flex items-baseline gap-2">
+                <span className={`text-5xl md:text-6xl ${color}`} style={{ fontFamily: "'Seven Segment', sans-serif" }}>
+                    {value}
                 </span>
-                <span className="text-[10px] text-neutral-700 dark:text-neutral-400" style={{ fontFamily: "'Space Mono', monospace" }}>
-                    {used.toFixed(0)}{unit}
+                <span className="text-lg text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    {unit}
                 </span>
             </div>
-            <div className="flex gap-[1px]">
-                {Array.from({ length: barSegments }).map((_, i) => {
-                    const isFilled = i < filledSegments
-                    const segmentPercent = (i / barSegments) * 100
-                    let color = 'bg-neutral-300 dark:bg-neutral-800'
-                    if (isFilled) {
-                        if (segmentPercent < 33) color = 'bg-yellow-500'
-                        else if (segmentPercent < 66) color = 'bg-orange-500'
-                        else color = 'bg-red-500'
-                    }
-                    return (
-                        <div key={i} className={`h-2 flex-1 ${color} ${isFilled ? 'opacity-100' : 'opacity-30'}`} />
-                    )
-                })}
-            </div>
+            {subValue && (
+                <div className="text-xs text-neutral-600 dark:text-neutral-600 mt-2" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    {subValue}
+                </div>
+            )}
         </div>
+    )
+}
+
+// Power button - each with its own background card
+function PowerButton({ icon: Icon, label, onClick, disabled, loading, variant = 'default' }: { 
+    icon: React.ElementType; label: string; onClick: () => void; disabled?: boolean; loading?: boolean; variant?: 'start' | 'stop' | 'kill' | 'default'
+}) {
+    const variants = {
+        start: 'bg-green-600 hover:bg-green-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800',
+        stop: 'bg-red-600 hover:bg-red-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800',
+        kill: 'bg-red-800 hover:bg-red-900 disabled:bg-neutral-300 dark:disabled:bg-neutral-800',
+        default: 'bg-orange-600 hover:bg-orange-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800'
+    }
+    return (
+        <button onClick={onClick} disabled={disabled || loading} className={`flex items-center gap-2 px-4 py-3 text-white text-xs transition-colors disabled:text-neutral-500 border border-neutral-300 dark:border-neutral-800/50 ${variants[variant]}`} style={{ fontFamily: "'Space Mono', monospace" }}>
+            {loading ? <Spinner size="sm" /> : <Icon className="w-4 h-4" />}
+            {label}
+        </button>
     )
 }
 
@@ -66,229 +67,92 @@ export function ConsolePage() {
     const getTokenFn = useCallback(() => token, [token])
     const api = useApi(getTokenFn)
     const { selectedTenantId } = useTenants()
-    const { notify } = useAlert()
     const navigate = useNavigate()
 
-    const [server, setServer] = useState<any>(null)
-    const [loading, setLoading] = useState(true)
-    const [error, setError] = useState<string | null>(null)
-    const [connected, setConnected] = useState(false)
-    const [connecting, setConnecting] = useState(false)
-    const [serverStatus, setServerStatus] = useState<string>('offline')
-    const [stats, setStats] = useState<ServerStats | null>(null)
+    // Local state
     const [logs, setLogs] = useState<LogLine[]>([])
     const [command, setCommand] = useState('')
     const [commandHistory, setCommandHistory] = useState<string[]>([])
     const [historyIndex, setHistoryIndex] = useState(-1)
-    const [powerLoading, setPowerLoading] = useState<string | null>(null)
 
-    const wsRef = useRef<WebSocket | null>(null)
     const logContainerRef = useRef<HTMLDivElement>(null)
     const logIdRef = useRef(0)
     const commandInputRef = useRef<HTMLInputElement>(null)
 
+    // Fetch server with caching and background updates
+    const { server, isLoading: loading, error } = useServer({
+        tenantId: selectedTenantId,
+        serverId: serverId || null,
+        api
+    })
+
+    // Global server state from Zustand (for real-time stats)
+    const {
+        status: serverStatus,
+        stats,
+        statsHistory,
+        isRunning,
+        isOffline,
+        reset: resetServerState
+    } = useServerStore()
+
     const addLog = useCallback((text: string, type: LogLine['type'] = 'stdout') => {
-        setLogs(prev => {
-            const newLog: LogLine = {
-                id: logIdRef.current++,
-                text,
-                type,
-                timestamp: new Date()
-            }
-            const updated = [...prev, newLog]
-            return updated.slice(-500)
-        })
+        setLogs(prev => [...prev, { id: logIdRef.current++, text, type, timestamp: new Date() }].slice(-500))
     }, [])
 
-    const formatTimestamp = useCallback((date: Date) => {
-        return date.toLocaleTimeString('en-US', { hour12: false })
-    }, [])
+    const formatTimestamp = useCallback((date: Date) => date.toLocaleTimeString('en-US', { hour12: false }), [])
+    const formatBytes = useCallback((bytes: number): number => bytes === 0 ? 0 : parseFloat((bytes / (1024 * 1024)).toFixed(1)), [])
 
-    const formatBytes = useCallback((bytes: number) => {
-        if (bytes === 0) return 0
-        const k = 1024
-        const sizes = ['B', 'KB', 'MB', 'GB']
-        const i = Math.floor(Math.log(bytes) / Math.log(k))
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(1))
-    }, [])
+    // WebSocket hook
+    const { connect, disconnect, sendCommand: wsSendCommand, connected, connecting } = useServerWebSocket({
+        onLog: addLog,
+        tenantId: selectedTenantId,
+        serverId: serverId || null,
+        api
+    })
 
-    const loadServer = useCallback(async () => {
-        if (!selectedTenantId || !serverId) return
+    // Power actions hook
+    const { sendPowerAction, loading: powerLoading } = useServerPower({
+        tenantId: selectedTenantId,
+        serverId: serverId || null,
+        api,
+        onLog: addLog
+    })
 
-        try {
-            setLoading(true)
-            setError(null)
-            const serversRes = await api.servers.list(selectedTenantId)
-            const foundServer = serversRes.items.find((s: any) => s.id === serverId)
-            
-            if (!foundServer) {
-                setError('Server not found')
-                return
-            }
-            
-            setServer(foundServer)
-            setServerStatus(foundServer.state || 'offline')
-        } catch (e: any) {
-            setError(e?.message || 'Failed to load server')
-        } finally {
-            setLoading(false)
-        }
-    }, [api, selectedTenantId, serverId])
-
-    const connectWebSocket = useCallback(async () => {
-        if (!server || !selectedTenantId) return
-
-        setConnecting(true)
-        addLog('Generating token...', 'info')
-
-        try {
-            // Get WebSocket credentials from backend (which proxies to lightd)
-            const credentials = await api.servers.websocket(selectedTenantId, server.id)
-            
-            addLog('Connecting to console...', 'info')
-            
-            const ws = new WebSocket(credentials.socket)
-            wsRef.current = ws
-
-            ws.onopen = () => {
-                addLog('WebSocket connected, waiting for logs...', 'success')
-            }
-
-            ws.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data)
-                    
-                    switch (data.event) {
-                        case 'init':
-                            // Init message: [container_id, container_uuid, status]
-                            if (data.args && data.args.length >= 3) {
-                                setConnected(true)
-                                setConnecting(false)
-                                setServerStatus(data.args[2])
-                                addLog(`Connected to container`, 'success')
-                            }
-                            break
-                        case 'console_output':
-                            if (data.args && data.args[0]) {
-                                addLog(data.args[0], 'stdout')
-                            }
-                            break
-                        case 'status':
-                            if (data.args && data.args[0]) {
-                                setServerStatus(data.args[0])
-                                addLog(`Status: ${data.args[0]}`, 'status')
-                            }
-                            break
-                        case 'stats':
-                            try {
-                                const statsData = typeof data.args[0] === 'string' 
-                                    ? JSON.parse(data.args[0]) 
-                                    : data.args[0]
-                                setStats(statsData)
-                            } catch {}
-                            break
-                        case 'daemon_message':
-                            if (data.args && data.args[0]) {
-                                addLog(`[daemon] ${data.args[0]}`, 'info')
-                            }
-                            break
-                        case 'error':
-                            if (data.args && data.args[0]) {
-                                addLog(`Error: ${data.args[0]}`, 'error')
-                            }
-                            break
-                        default:
-                            if (data.args && data.args.length > 0) {
-                                addLog(`[${data.event}] ${data.args.join(' ')}`, 'info')
-                            }
-                    }
-                } catch {
-                    // Raw text message
-                    addLog(event.data, 'stdout')
-                }
-            }
-
-            ws.onclose = (event) => {
-                setConnected(false)
-                setConnecting(false)
-                addLog(`Disconnected (code: ${event.code})`, 'info')
-            }
-
-            ws.onerror = () => {
-                setConnected(false)
-                setConnecting(false)
-                addLog('Connection error', 'error')
-            }
-        } catch (e: any) {
-            setConnecting(false)
-            addLog(`Failed to connect: ${e?.message || 'Unknown error'}`, 'error')
-        }
-    }, [server, selectedTenantId, api, addLog])
-
-    const disconnectWebSocket = useCallback(() => {
-        if (wsRef.current) {
-            wsRef.current.close()
-            wsRef.current = null
-        }
-        setConnected(false)
-    }, [])
-
-    const sendCommand = useCallback((cmd: string) => {
-        if (!wsRef.current || !connected || !cmd.trim()) return
-
-        const trimmedCmd = cmd.trim()
-        wsRef.current.send(JSON.stringify({ event: 'send_command', args: [trimmedCmd] }))
-        addLog(`> ${trimmedCmd}`, 'info')
-
-        setCommandHistory(prev => [trimmedCmd, ...prev.filter(c => c !== trimmedCmd)].slice(0, 50))
-        setHistoryIndex(-1)
-        setCommand('')
-    }, [connected, addLog])
-
-    const sendPowerAction = useCallback(async (action: string) => {
-        if (!selectedTenantId || !serverId) return
+    // Command handling
+    const handleSendCommand = useCallback((cmd: string) => {
+        if (!cmd.trim()) return
         
-        setPowerLoading(action)
-        const actionLabels: Record<string, string> = {
-            start: 'Starting', stop: 'Stopping', restart: 'Restarting', kill: 'Force stopping'
+        const trimmedCmd = cmd.trim()
+        const success = wsSendCommand(trimmedCmd)
+        
+        if (success) {
+            addLog(`> ${trimmedCmd}`, 'info')
+            setCommandHistory(prev => [trimmedCmd, ...prev.filter(c => c !== trimmedCmd)].slice(0, 50))
+            setHistoryIndex(-1)
+            setCommand('')
         }
-        addLog(`${actionLabels[action] || action} server...`, 'info')
+    }, [wsSendCommand, addLog])
 
-        try {
-            switch (action) {
-                case 'start': await api.servers.start(selectedTenantId, serverId); break
-                case 'stop': await api.servers.stop(selectedTenantId, serverId); break
-                case 'restart': await api.servers.restart(selectedTenantId, serverId); break
-                case 'kill': await api.servers.kill(selectedTenantId, serverId); break
-            }
-            notify({ description: `${actionLabels[action]} server...`, type: 'success' })
-        } catch (e: any) {
-            addLog(`Failed to ${action}: ${e?.message}`, 'error')
-            notify({ description: e?.message || `Failed to ${action}`, type: 'error' })
-        } finally {
-            setPowerLoading(null)
-        }
-    }, [api, selectedTenantId, serverId, notify, addLog])
-
-    const handleCommandSubmit = useCallback((e: React.FormEvent) => {
+    const handleCommandSubmit = useCallback((e: React.FormEvent) => { 
         e.preventDefault()
-        sendCommand(command)
-    }, [command, sendCommand])
-
+        handleSendCommand(command)
+    }, [command, handleSendCommand])
+    
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-        if (e.key === 'ArrowUp') {
+        if (e.key === 'ArrowUp') { 
             e.preventDefault()
-            if (historyIndex < commandHistory.length - 1) {
-                const newIndex = historyIndex + 1
-                setHistoryIndex(newIndex)
-                setCommand(commandHistory[newIndex])
+            if (historyIndex < commandHistory.length - 1) { 
+                const i = historyIndex + 1
+                setHistoryIndex(i)
+                setCommand(commandHistory[i])
             }
-        } else if (e.key === 'ArrowDown') {
+        } else if (e.key === 'ArrowDown') { 
             e.preventDefault()
-            if (historyIndex > 0) {
+            if (historyIndex > 0) { 
                 setHistoryIndex(historyIndex - 1)
                 setCommand(commandHistory[historyIndex - 1])
-            } else {
+            } else { 
                 setHistoryIndex(-1)
                 setCommand('')
             }
@@ -296,262 +160,236 @@ export function ConsolePage() {
     }, [historyIndex, commandHistory])
 
     // Auto-scroll logs
-    useEffect(() => {
+    useEffect(() => { 
         if (logContainerRef.current) {
             logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
         }
     }, [logs])
 
-    useEffect(() => { loadServer() }, [loadServer])
-    
     // Connect WebSocket when server is loaded
-    useEffect(() => {
+    useEffect(() => { 
         if (server && !connected && !connecting) {
-            connectWebSocket()
+            connect()
         }
-        return () => disconnectWebSocket()
-    }, [server])
+    }, [server?.id, connected, connecting]) // Only depend on server.id, not the whole server object
 
-    const isRunning = serverStatus === 'running' || serverStatus === 'ready'
-    const isOffline = serverStatus === 'offline' || serverStatus === 'stopped' || serverStatus === 'exited'
-    const isStopping = serverStatus === 'stopping'
-    const isStarting = serverStatus === 'starting' || serverStatus === 'installing'
+    // Cleanup on unmount
+    useEffect(() => {
+        return () => {
+            disconnect()
+            resetServerState()
+        }
+    }, [])
+    
+    // Parse limits from server response
+    const parseLimit = (limitStr: string): number => {
+        if (!limitStr) return 0
+        const match = limitStr.match(/^(\d+(?:\.\d+)?)(MB|GB|%)$/)
+        if (!match) return 0
+        const value = parseFloat(match[1])
+        const unit = match[2]
+        if (unit === 'GB') return value * 1024
+        if (unit === 'MB') return value
+        return value
+    }
+    
+    const memoryLimit = server?.limits?.memory ? parseLimit(server.limits.memory) : (server?.memoryMb || 512)
+    const diskLimit = server?.limits?.disk ? parseLimit(server.limits.disk) : (server?.diskMb || 5120)
+    const cpuLimit = server?.limits?.cpu ? parseFloat(server.limits.cpu) * 100 : (server?.cpuPercent || 100)
+    
+    // When offline, show zero for all resources
+    const memoryMb = (stats && isRunning) ? formatBytes(stats.memory_bytes) : 0
+    const memoryPercent = (stats && isRunning && memoryLimit) ? Math.round((memoryMb / memoryLimit) * 100) : 0
+    const cpuPercent = (stats && isRunning) ? stats.cpu_absolute : 0
+    const diskMb = (stats && isRunning) ? formatBytes(stats.disk_bytes) : 0
+    const diskPercent = (isRunning && diskLimit) ? Math.round((diskMb / diskLimit) * 100) : 0
 
-    if (!selectedTenantId) {
-        return (
-            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
-                <p className="text-sm text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
-                    Select a tenant first
-                </p>
+    // Chart data - show zero line if no history
+    const chartData = statsHistory.length > 0 ? statsHistory : [{ time: '--:--:--', memory: 0, cpu: 0 }]
+
+    if (!selectedTenantId) return (
+        <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+            <p className="text-sm text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
+                Select a tenant first
+            </p>
+        </div>
+    )
+    
+    if (loading) return (
+        <div className="flex items-center justify-center py-12"><LoadingAnimation/></div>
+    )
+    
+    if (error) return (
+        <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+            <div className="text-red-600 dark:text-red-400" style={{ fontFamily: "'Space Mono', monospace" }}>
+                {typeof error === 'string' ? error : (error as any)?.message || 'Failed to load server'}
             </div>
-        )
-    }
-
-    if (loading) {
-        return <div className="flex items-center justify-center py-12"><Spinner size="lg" /></div>
-    }
-
-    if (error || !server) {
-        return (
-            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
-                <div className="text-red-600 dark:text-red-400" style={{ fontFamily: "'Space Mono', monospace" }}>
-                    {error || 'Server not found'}
-                </div>
-            </div>
-        )
-    }
+        </div>
+    )
+    
+    if (!server) return null
 
     return (
-        <div className="space-y-4 md:space-y-6">
-            {/* Header - Mobile Responsive */}
-            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-                <div className="flex items-center gap-3">
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => navigate('/servers')}
-                        className="text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 p-1"
-                    >
-                        <ArrowLeftIcon className="w-4 h-4" />
-                    </Button>
-                    <div className="flex gap-1">
-                        <span className={`w-2 h-2 rounded-sm ${isRunning ? 'bg-green-500' : isOffline ? 'bg-red-500' : 'bg-yellow-500'}`}></span>
-                        <span className={`w-2 h-2 rounded-sm ${connected ? 'bg-green-500' : 'bg-neutral-500'}`}></span>
+        <div className="space-y-4">
+            <ServerNavigation activeTab="console" />
+           
+            {/* Top Row: Server Info (left) + Power Buttons (right) */}
+            <div className="bg-neutral-100 flex dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+                <div className="flex flex-col md:flex-row gap-4 items-end md:items-center justify-end">
+                    {/* Server Name + Status */}
+                    <div className="flex-1">
+                        <div className=" gap-3 mb-2">
+                            <h1 className="text-3xl md:text-4xl text-neutral-900 dark:text-neutral-100 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
+                                {server.name.toUpperCase()}
+                            </h1>
+                        </div>
+                        <div className=" gap-3">
+                            <span className={`text-xs px-2 py-0.5 rounded ${isRunning ? 'bg-green-500/10 text-green-600 dark:text-green-400' : isOffline ? 'bg-red-500/10 text-red-600 dark:text-red-400' : 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'}`} style={{ fontFamily: "'Space Mono', monospace" }}>
+                                {isOffline && (serverStatus === 'running' || serverStatus === 'ready') ? 'STOPPED' : (serverStatus || 'UNKNOWN').toUpperCase()}
+                            </span>
+                            <span className="text-[10px] text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
+                                {server.containerId?.slice(0, 12) || 'N/A'}
+                            </span>
+                        </div>
                     </div>
-                    <h1 className="text-xl md:text-2xl text-neutral-900 dark:text-neutral-100 tracking-wider truncate" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
-                        {server.name.toUpperCase()}
-                    </h1>
-                </div>
-                <div className="flex items-center gap-2 sm:ml-auto">
-                    <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-800 sm:hidden"></div>
-                    <span className={`text-[10px] px-2 py-1 rounded whitespace-nowrap ${
-                        isRunning ? 'bg-green-500/20 text-green-600 dark:text-green-400' :
-                        isOffline ? 'bg-red-500/20 text-red-600 dark:text-red-400' :
-                        'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400'
-                    }`} style={{ fontFamily: "'Space Mono', monospace" }}>
-                        {serverStatus.toUpperCase()}
-                    </span>
+
+                    {/* Power Buttons */}
+                    <div className="flex flex-wrap gap-2">
+                        <PowerButton icon={PlayIcon} label="START" onClick={() => sendPowerAction('start')} disabled={!!powerLoading || isRunning} loading={powerLoading === 'start'} variant="start" />
+                        <PowerButton icon={ArrowPathIcon} label="RESTART" onClick={() => sendPowerAction('restart')} disabled={!!powerLoading || isOffline} loading={powerLoading === 'restart'} variant="default" />
+                        <PowerButton icon={StopIcon} label="STOP" onClick={() => sendPowerAction('stop')} disabled={!!powerLoading || isOffline} loading={powerLoading === 'stop'} variant="stop" />
+                        <PowerButton icon={BoltIcon} label="KILL" onClick={() => sendPowerAction('kill')} disabled={!!powerLoading || isOffline} loading={powerLoading === 'kill'} variant="kill" />
+                    </div>
                 </div>
             </div>
 
-            {/* Power Actions & Stats - Mobile Responsive */}
-            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-3 md:p-4">
-                <div className="flex flex-col gap-4">
-                    {/* Power Buttons - Wrap on mobile */}
-                    <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mr-1" style={{ fontFamily: "'Space Mono', monospace" }}>
-                            Power
-                        </span>
-                        <button
-                            onClick={() => sendPowerAction('start')}
-                            disabled={!!powerLoading || isRunning || isStarting}
-                            className="px-2 md:px-3 py-1 text-[10px] md:text-xs bg-green-600 hover:bg-green-700 disabled:bg-neutral-700 disabled:text-neutral-500 text-white transition-colors"
-                            style={{ fontFamily: "'Space Mono', monospace" }}
-                        >
-                            {powerLoading === 'start' ? '...' : 'START'}
-                        </button>
-                        <button
-                            onClick={() => sendPowerAction('restart')}
-                            disabled={!!powerLoading || isOffline}
-                            className="px-2 md:px-3 py-1 text-[10px] md:text-xs bg-orange-600 hover:bg-orange-700 disabled:bg-neutral-700 disabled:text-neutral-500 text-white transition-colors"
-                            style={{ fontFamily: "'Space Mono', monospace" }}
-                        >
-                            {powerLoading === 'restart' ? '...' : 'RESTART'}
-                        </button>
-                        <button
-                            onClick={() => sendPowerAction('stop')}
-                            disabled={!!powerLoading || isOffline}
-                            className="px-2 md:px-3 py-1 text-[10px] md:text-xs bg-red-600 hover:bg-red-700 disabled:bg-neutral-700 disabled:text-neutral-500 text-white transition-colors"
-                            style={{ fontFamily: "'Space Mono', monospace" }}
-                        >
-                            {powerLoading === 'stop' ? '...' : 'STOP'}
-                        </button>
-                        <button
-                            onClick={() => sendPowerAction('kill')}
-                            disabled={!!powerLoading || isOffline}
-                            className="px-2 md:px-3 py-1 text-[10px] md:text-xs bg-red-800 hover:bg-red-900 disabled:bg-neutral-700 disabled:text-neutral-500 text-white transition-colors"
-                            style={{ fontFamily: "'Space Mono', monospace" }}
-                        >
-                            {powerLoading === 'kill' ? '...' : 'KILL'}
-                        </button>
-                    </div>
-
-                    {/* Stats - Grid on mobile */}
-                    <div className="grid grid-cols-3 gap-2 md:gap-4">
-                        <ResourceBar
-                            label="MEM"
-                            used={stats ? formatBytes(stats.memory_bytes) : 0}
-                            total={server.memoryMb || 512}
-                            unit="MB"
-                        />
-                        <ResourceBar
-                            label="CPU"
-                            used={stats?.cpu_absolute || 0}
-                            total={server.cpuPercent || 100}
-                            unit="%"
-                        />
-                        <ResourceBar
-                            label="DISK"
-                            used={stats ? formatBytes(stats.disk_bytes) : 0}
-                            total={(server.diskMb || 5) * 1024}
-                            unit="MB"
-                        />
-                    </div>
-                </div>
+            {/* Resource Cards Row */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <ResourceCard 
+                    label="CPU Usage" 
+                    value={cpuPercent.toFixed(1)} 
+                    unit="%" 
+                    subValue={`of ${cpuLimit.toFixed(0)}% limit`}
+                    color={isOffline ? 'text-neutral-500 dark:text-neutral-600' : cpuPercent > 80 ? 'text-red-500' : cpuPercent > 50 ? 'text-orange-500' : 'text-yellow-500'} 
+                />
+                <ResourceCard 
+                    label="Memory" 
+                    value={memoryPercent} 
+                    unit="%" 
+                    subValue={`${memoryMb.toFixed(0)} / ${memoryLimit.toFixed(0)} MB`}
+                    color={isOffline ? 'text-neutral-500 dark:text-neutral-600' : memoryPercent > 80 ? 'text-red-500' : memoryPercent > 50 ? 'text-orange-500' : 'text-yellow-500'} 
+                />
+                <ResourceCard 
+                    label="Disk" 
+                    value={diskPercent} 
+                    unit="%" 
+                    subValue={`${diskMb.toFixed(0)} / ${diskLimit.toFixed(0)} MB`}
+                    color={isOffline ? 'text-neutral-500 dark:text-neutral-600' : diskPercent > 80 ? 'text-red-500' : diskPercent > 50 ? 'text-orange-500' : 'text-yellow-500'} 
+                />
             </div>
 
             {/* Console */}
-            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-3 md:p-4">
-                <div className="flex items-center gap-2 md:gap-3 mb-3 md:mb-4">
-                    <h2 className="text-base md:text-lg text-neutral-900 dark:text-neutral-100 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
-                        CONSOLE
-                    </h2>
+            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+                <div className="flex items-center gap-3 mb-6">
+                    <h2 className="text-2xl text-neutral-900 dark:text-neutral-100 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>CONSOLE</h2>
                     <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-800"></div>
-                    <div className="flex items-center gap-2">
-                        {connecting ? (
-                            <span className="text-[10px] text-yellow-600 dark:text-yellow-400" style={{ fontFamily: "'Space Mono', monospace" }}>
-                                CONNECTING...
-                            </span>
-                        ) : connected ? (
-                            <span className="text-[10px] text-green-600 dark:text-green-400" style={{ fontFamily: "'Space Mono', monospace" }}>
-                                ● LIVE
-                            </span>
-                        ) : (
-                            <button
-                                onClick={connectWebSocket}
-                                className="text-[10px] text-red-600 dark:text-red-400 hover:text-red-500" 
-                                style={{ fontFamily: "'Space Mono', monospace" }}
-                            >
-                                ○ RECONNECT
-                            </button>
-                        )}
-                    </div>
+                    {connecting ? (
+                        <span className="text-[10px] text-yellow-600 dark:text-yellow-400" style={{ fontFamily: "'Space Mono', monospace" }}>CONNECTING...</span>
+                    ) : connected ? (
+                        <span className="text-[10px] text-green-600 dark:text-green-400" style={{ fontFamily: "'Space Mono', monospace" }}>● LIVE</span>
+                    ) : (
+                        <button onClick={connect} className="text-[10px] text-red-600 dark:text-red-400 hover:text-red-500 dark:hover:text-red-300" style={{ fontFamily: "'Space Mono', monospace" }}>○ RECONNECT</button>
+                    )}
                 </div>
 
-                {/* Log output - Responsive height */}
-                <div
-                    ref={logContainerRef}
-                    className="bg-black border border-neutral-800 p-2 md:p-4 h-64 md:h-96 overflow-y-auto font-mono text-xs md:text-sm"
-                    onClick={() => commandInputRef.current?.focus()}
-                >
+                <div ref={logContainerRef} className="bg-neutral-50 dark:bg-neutral-900/50 border border-neutral-300 dark:border-neutral-800/50 p-4 overflow-y-auto font-mono text-sm" style={{ height: '400px', maxHeight: '400px' }} onClick={() => commandInputRef.current?.focus()}>
                     {logs.length === 0 ? (
-                        <div className="text-neutral-600" style={{ fontFamily: "'Space Mono', monospace" }}>
-                            {connecting ? 'Connecting...' : 'Waiting for output...'}
-                        </div>
+                        <div className="text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>{connecting ? 'Connecting...' : 'Waiting for output...'}</div>
                     ) : (
                         logs.map((log) => (
-                            <div
-                                key={log.id}
-                                className={`leading-relaxed break-all ${
-                                    log.type === 'error' ? 'text-red-400' :
-                                    log.type === 'success' ? 'text-green-400' :
-                                    log.type === 'info' ? 'text-blue-400' :
-                                    log.type === 'status' ? 'text-yellow-400' :
-                                    'text-neutral-300'
-                                }`}
-                                style={{ fontFamily: "'Space Mono', monospace" }}
-                            >
-                                <span className="text-neutral-600 mr-1 md:mr-2 hidden sm:inline">[{formatTimestamp(log.timestamp)}]</span>
-                                {log.text}
+                            <div key={log.id} className={`leading-relaxed break-all ${log.type === 'error' ? 'text-red-600 dark:text-red-400' : log.type === 'success' ? 'text-green-600 dark:text-green-400' : log.type === 'info' ? 'text-blue-600 dark:text-blue-400' : log.type === 'status' ? 'text-yellow-600 dark:text-yellow-400' : 'text-neutral-700 dark:text-neutral-300'}`} style={{ fontFamily: "'Space Mono', monospace" }}>
+                                <span className="text-neutral-500 dark:text-neutral-600 mr-2">[{formatTimestamp(log.timestamp)}]</span>{log.text}
                             </div>
                         ))
                     )}
                 </div>
 
-                {/* Command input */}
-                <form onSubmit={handleCommandSubmit} className="mt-2 flex gap-2">
+                <form onSubmit={handleCommandSubmit} className="mt-4 flex gap-2">
                     <div className="flex-1 relative">
-                        <span className="absolute left-2 md:left-3 top-1/2 -translate-y-1/2 text-neutral-500 text-xs md:text-sm" style={{ fontFamily: "'Space Mono', monospace" }}>
-                            &gt;
-                        </span>
-                        <Input
-                            ref={commandInputRef}
-                            value={command}
-                            onChange={(e) => setCommand(e.target.value)}
-                            onKeyDown={handleKeyDown}
-                            placeholder={connected ? "Command..." : "Connect first"}
-                            disabled={!connected}
-                            className="pl-6 md:pl-8 text-xs md:text-sm bg-black border-neutral-800 text-neutral-100 placeholder:text-neutral-600"
-                            style={{ fontFamily: "'Space Mono', monospace" }}
-                        />
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500 dark:text-neutral-500 text-sm" style={{ fontFamily: "'Space Mono', monospace" }}>&gt;</span>
+                        <Input ref={commandInputRef} value={command} onChange={(e) => setCommand(e.target.value)} onKeyDown={handleKeyDown} placeholder={connected ? "Enter command..." : "Connect first"} disabled={!connected} className="pl-8 text-sm bg-neutral-50 dark:bg-neutral-900/50 border-neutral-300 dark:border-neutral-800/50 text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-500 dark:placeholder:text-neutral-600" style={{ fontFamily: "'Space Mono', monospace" }} />
                     </div>
-                    <Button
-                        type="submit"
-                        disabled={!connected || !command.trim()}
-                        className="px-3 md:px-4 text-xs md:text-sm bg-red-600 hover:bg-red-700 disabled:bg-neutral-800 text-white"
-                        style={{ fontFamily: "'Space Mono', monospace" }}
-                    >
-                        SEND
-                    </Button>
+                    <Button type="submit" disabled={!connected || !command.trim()} className="px-4 text-sm bg-red-600 hover:bg-red-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800 text-white border-transparent" style={{ fontFamily: "'Space Mono', monospace" }}>SEND</Button>
                 </form>
             </div>
 
-            {/* Server Info - Mobile Responsive */}
-            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-3 md:p-4">
-                <div className="flex items-center gap-2 md:gap-3 mb-3 md:mb-4">
-                    <h2 className="text-base md:text-lg text-neutral-900 dark:text-neutral-100 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
-                        INFO
-                    </h2>
+            {/* Charts - Always visible, show zero line when no data */}
+            <div className="grid md:grid-cols-2 gap-4">
+                <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-600 dark:text-neutral-500 mb-3" style={{ fontFamily: "'Space Mono', monospace" }}>Memory History (MB)</div>
+                    <div style={{ width: '100%', height: '160px' }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={chartData}>
+                                <defs>
+                                    <linearGradient id="memGrad" x1="0" y1="0" x2="0" y2="1">
+                                        <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.3}/>
+                                        <stop offset="95%" stopColor="#f59e0b" stopOpacity={0}/>
+                                    </linearGradient>
+                                </defs>
+                                <XAxis dataKey="time" tick={{ fill: '#737373', fontSize: 9 }} axisLine={{ stroke: '#404040' }} tickLine={false} />
+                                <YAxis tick={{ fill: '#737373', fontSize: 9 }} axisLine={{ stroke: '#404040' }} tickLine={false} width={40} domain={[0, 'auto']} />
+                                <Tooltip contentStyle={{ backgroundColor: '#0a0a0a', border: '1px solid #404040', borderRadius: 0, fontFamily: "'Space Mono', monospace", fontSize: 10 }} labelStyle={{ color: '#737373' }} itemStyle={{ color: '#f59e0b' }} />
+                                <Area type="monotone" dataKey="memory" stroke="#f59e0b" strokeWidth={2} fill="url(#memGrad)" />
+                            </AreaChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+
+                <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-600 dark:text-neutral-500 mb-3" style={{ fontFamily: "'Space Mono', monospace" }}>CPU History (%)</div>
+                    <div style={{ width: '100%', height: '160px' }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={chartData}>
+                                <defs>
+                                    <linearGradient id="cpuGrad" x1="0" y1="0" x2="0" y2="1">
+                                        <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
+                                        <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                                    </linearGradient>
+                                </defs>
+                                <XAxis dataKey="time" tick={{ fill: '#737373', fontSize: 9 }} axisLine={{ stroke: '#404040' }} tickLine={false} />
+                                <YAxis tick={{ fill: '#737373', fontSize: 9 }} axisLine={{ stroke: '#404040' }} tickLine={false} domain={[0, 100]} width={40} />
+                                <Tooltip contentStyle={{ backgroundColor: '#0a0a0a', border: '1px solid #404040', borderRadius: 0, fontFamily: "'Space Mono', monospace", fontSize: 10 }} labelStyle={{ color: '#737373' }} itemStyle={{ color: '#ef4444' }} />
+                                <Area type="monotone" dataKey="cpu" stroke="#ef4444" strokeWidth={2} fill="url(#cpuGrad)" />
+                            </AreaChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+            </div>
+
+            {/* Server Info */}
+            <div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+                <div className="flex items-center gap-3 mb-6">
+                    <h2 className="text-2xl text-neutral-900 dark:text-neutral-100 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>INFO</h2>
                     <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-800"></div>
                 </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 text-[10px] md:text-xs" style={{ fontFamily: "'Space Mono', monospace" }}>
-                    <div>
-                        <div className="text-[9px] md:text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Container</div>
-                        <div className="text-neutral-900 dark:text-neutral-100 truncate">{server.containerId?.slice(0, 8) || 'N/A'}</div>
-                    </div>
-                    <div>
-                        <div className="text-[9px] md:text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Node</div>
-                        <div className="text-neutral-900 dark:text-neutral-100 truncate">{server.node || 'Unknown'}</div>
-                    </div>
-                    <div>
-                        <div className="text-[9px] md:text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Memory</div>
-                        <div className="text-neutral-900 dark:text-neutral-100">{server.memoryMb || 0} MB</div>
-                    </div>
-                    <div>
-                        <div className="text-[9px] md:text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Disk</div>
-                        <div className="text-neutral-900 dark:text-neutral-100">{server.diskMb || 0} MB</div>
-                    </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    <div><div className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Container</div><div className="text-neutral-900 dark:text-neutral-100 truncate">{server.containerId?.slice(0, 12) || 'N/A'}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Node</div><div className="text-neutral-900 dark:text-neutral-100 truncate">{server.nodeId?.slice(0, 12) || server.node || 'Unknown'}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Image</div><div className="text-neutral-900 dark:text-neutral-100 truncate">{server.dockerImage || 'N/A'}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Software</div><div className="text-neutral-900 dark:text-neutral-100 truncate">{server.serverSoftwareId?.slice(0, 12) || 'N/A'}</div></div>
                 </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs mt-4" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    <div><div className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">CPU Limit</div><div className="text-neutral-900 dark:text-neutral-100">{server.limits?.cpu || 'N/A'} vCPUs</div></div>
+                    <div><div className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Memory Limit</div><div className="text-neutral-900 dark:text-neutral-100">{server.limits?.memory || 'N/A'}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Disk Limit</div><div className="text-neutral-900 dark:text-neutral-100">{server.limits?.disk || 'N/A'}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">PIDs Limit</div><div className="text-neutral-900 dark:text-neutral-100">{server.limits?.pids || 'N/A'}</div></div>
+                </div>
+                {server.startup?.command && (
+                    <div className="mt-4 text-xs" style={{ fontFamily: "'Space Mono', monospace" }}>
+                        <div className="text-[10px] uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-500 mb-1">Startup Command</div>
+                        <div className="text-neutral-900 dark:text-neutral-100 bg-neutral-50 dark:bg-neutral-900/50 border border-neutral-300 dark:border-neutral-800/50 p-3 font-mono text-[11px] break-all">{server.startup.command}</div>
+                    </div>
+                )}
             </div>
         </div>
     )
