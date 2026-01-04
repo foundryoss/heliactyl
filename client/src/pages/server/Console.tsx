@@ -14,8 +14,9 @@ import { useServerWebSocket } from '@/hooks/useServerWebSocket'
 import { useServerPower } from '@/hooks/useServerPower'
 import { useServer } from '@/hooks/useServer'
 import LoadingAnimation from '@/components/loaders'
+import { Modal } from '@/components/ui/Modal'
 
-interface LogLine { id: number; text: string; type: 'stdout' | 'info' | 'error' | 'success' | 'status'; timestamp: Date }
+interface LogLine { id: number; text: string; type: 'stdout' | 'info' | 'error' | 'success' | 'status' | 'muted'; timestamp: Date }
 
 // Resource card with big Seven Segment display
 function ResourceCard({ label, value, unit, subValue, color = 'text-red-500' }: { 
@@ -48,15 +49,20 @@ function PowerButton({ icon: Icon, label, onClick, disabled, loading, variant = 
     icon: React.ElementType; label: string; onClick: () => void; disabled?: boolean; loading?: boolean; variant?: 'start' | 'stop' | 'kill' | 'default'
 }) {
     const variants = {
-        start: 'bg-green-600 hover:bg-green-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800',
-        stop: 'bg-red-600 hover:bg-red-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800',
-        kill: 'bg-red-800 hover:bg-red-900 disabled:bg-neutral-300 dark:disabled:bg-neutral-800',
-        default: 'bg-orange-600 hover:bg-orange-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800'
+        start: 'bg-green-600 hover:bg-green-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800 disabled:text-neutral-500',
+        stop: 'bg-red-600 hover:bg-red-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800 disabled:text-neutral-500',
+        kill: 'bg-red-800 hover:bg-red-900 disabled:bg-neutral-300 dark:disabled:bg-neutral-800 disabled:text-neutral-500',
+        default: 'bg-orange-600 hover:bg-orange-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800 disabled:text-neutral-500'
     }
     return (
-        <button onClick={onClick} disabled={disabled || loading} className={`flex items-center gap-2 px-4 py-3 text-white text-xs transition-colors disabled:text-neutral-500 border border-neutral-300 dark:border-neutral-800/50 ${variants[variant]}`} style={{ fontFamily: "'Space Mono', monospace" }}>
+        <button 
+            onClick={onClick} 
+            disabled={disabled || loading} 
+            className={`flex items-center justify-center gap-2 px-3 py-2 text-white text-xs transition-colors border border-neutral-300 dark:border-neutral-700 shadow-sm hover:shadow-md disabled:shadow-none ${variants[variant]}`} 
+            style={{ fontFamily: "'Space Mono', monospace" }}
+        >
             {loading ? <Spinner size="sm" /> : <Icon className="w-4 h-4" />}
-            {label}
+            <span className="whitespace-nowrap">{label}</span>
         </button>
     )
 }
@@ -74,6 +80,7 @@ export function ConsolePage() {
     const [command, setCommand] = useState('')
     const [commandHistory, setCommandHistory] = useState<string[]>([])
     const [historyIndex, setHistoryIndex] = useState(-1)
+    const [showKillConfirm, setShowKillConfirm] = useState(false)
 
     const logContainerRef = useRef<HTMLDivElement>(null)
     const logIdRef = useRef(0)
@@ -115,8 +122,17 @@ export function ConsolePage() {
         tenantId: selectedTenantId,
         serverId: serverId || null,
         api,
-        onLog: addLog
+       // onLog: addLog
     })
+
+    const handleKillClick = useCallback(() => {
+        setShowKillConfirm(true)
+    }, [])
+
+    const handleKillConfirm = useCallback(() => {
+        setShowKillConfirm(false)
+        sendPowerAction('kill')
+    }, [sendPowerAction])
 
     // Command handling
     const handleSendCommand = useCallback((cmd: string) => {
@@ -232,35 +248,34 @@ export function ConsolePage() {
         <div className="space-y-4">
             <ServerNavigation activeTab="console" />
            
+          
             {/* Top Row: Server Info (left) + Power Buttons (right) */}
-            <div className="bg-neutral-100 flex dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
-                <div className="flex flex-col md:flex-row gap-4 items-end md:items-center justify-end">
-                    {/* Server Name + Status */}
-                    <div className="flex-1">
-                        <div className=" gap-3 mb-2">
-                            <h1 className="text-3xl md:text-4xl text-neutral-900 dark:text-neutral-100 tracking-wider" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
-                                {server.name.toUpperCase()}
-                            </h1>
-                        </div>
-                        <div className=" gap-3">
-                            <span className={`text-xs px-2 py-0.5 rounded ${isRunning ? 'bg-green-500/10 text-green-600 dark:text-green-400' : isOffline ? 'bg-red-500/10 text-red-600 dark:text-red-400' : 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'}`} style={{ fontFamily: "'Space Mono', monospace" }}>
-                                {isOffline && (serverStatus === 'running' || serverStatus === 'ready') ? 'STOPPED' : (serverStatus || 'UNKNOWN').toUpperCase()}
-                            </span>
-                            <span className="text-[10px] text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
-                                {server.containerId?.slice(0, 12) || 'N/A'}
-                            </span>
-                        </div>
-                    </div>
-
-                    {/* Power Buttons */}
-                    <div className="flex flex-wrap gap-2">
-                        <PowerButton icon={PlayIcon} label="START" onClick={() => sendPowerAction('start')} disabled={!!powerLoading || isRunning} loading={powerLoading === 'start'} variant="start" />
-                        <PowerButton icon={ArrowPathIcon} label="RESTART" onClick={() => sendPowerAction('restart')} disabled={!!powerLoading || isOffline} loading={powerLoading === 'restart'} variant="default" />
-                        <PowerButton icon={StopIcon} label="STOP" onClick={() => sendPowerAction('stop')} disabled={!!powerLoading || isOffline} loading={powerLoading === 'stop'} variant="stop" />
-                        <PowerButton icon={BoltIcon} label="KILL" onClick={() => sendPowerAction('kill')} disabled={!!powerLoading || isOffline} loading={powerLoading === 'kill'} variant="kill" />
-                    </div>
-                </div>
+<div className="bg-neutral-100 dark:bg-black border border-neutral-300 dark:border-neutral-800/50 p-6">
+    <div className="flex items-center justify-between gap-4">
+        {/* Server Name + Status */}
+        <div className="flex-1 min-w-0">
+            <h1 className="text-3xl md:text-4xl text-neutral-900 dark:text-neutral-100 tracking-wider mb-2" style={{ fontFamily: "'Seven Segment', sans-serif" }}>
+                {server.name.toUpperCase()}
+            </h1>
+            <div className="flex items-center gap-3">
+                <span className={`text-xs px-2 py-0.5 rounded ${isRunning ? 'bg-green-500/10 text-green-600 dark:text-green-400' : isOffline ? 'bg-red-500/10 text-red-600 dark:text-red-400' : 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'}`} style={{ fontFamily: "'Space Mono', monospace" }}>
+                    {isOffline && (serverStatus === 'running' || serverStatus === 'ready') ? 'STOPPED' : (serverStatus || 'UNKNOWN').toUpperCase()}
+                </span>
+                <span className="text-[10px] text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
+                    {server.containerId?.slice(0, 12) || 'N/A'}
+                </span>
             </div>
+        </div>
+
+        {/* Power Buttons */}
+        <div className="flex gap-2 flex-shrink-0">
+            <PowerButton icon={PlayIcon} label="START" onClick={() => sendPowerAction('start')} disabled={!!powerLoading || isRunning} loading={powerLoading === 'start'} variant="start" />
+            <PowerButton icon={ArrowPathIcon} label="RESTART" onClick={() => sendPowerAction('restart')} disabled={!!powerLoading || isOffline} loading={powerLoading === 'restart'} variant="default" />
+            <PowerButton icon={StopIcon} label="STOP" onClick={() => sendPowerAction('stop')} disabled={!!powerLoading || isOffline} loading={powerLoading === 'stop'} variant="stop" />
+            <PowerButton icon={BoltIcon} label="KILL" onClick={handleKillClick} disabled={!!powerLoading || isOffline} loading={powerLoading === 'kill'} variant="kill" />
+        </div>
+    </div>
+</div>
 
             {/* Resource Cards Row */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -306,7 +321,7 @@ export function ConsolePage() {
                         <div className="text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>{connecting ? 'Connecting...' : 'Waiting for output...'}</div>
                     ) : (
                         logs.map((log) => (
-                            <div key={log.id} className={`leading-relaxed break-all ${log.type === 'error' ? 'text-red-600 dark:text-red-400' : log.type === 'success' ? 'text-green-600 dark:text-green-400' : log.type === 'info' ? 'text-blue-600 dark:text-blue-400' : log.type === 'status' ? 'text-yellow-600 dark:text-yellow-400' : 'text-neutral-700 dark:text-neutral-300'}`} style={{ fontFamily: "'Space Mono', monospace" }}>
+                            <div key={log.id} className={`leading-relaxed break-all ${log.type === 'error' ? 'text-red-600 dark:text-red-400' : log.type === 'success' ? 'text-green-600 dark:text-green-400' : log.type === 'info' ? 'text-blue-600 dark:text-blue-400' : log.type === 'status' ? 'text-yellow-600 dark:text-yellow-400' : log.type === 'muted' ? 'text-neutral-500 dark:text-neutral-600' : 'text-neutral-700 dark:text-neutral-300'}`} style={{ fontFamily: "'Space Mono', monospace" }}>
                                 <span className="text-neutral-500 dark:text-neutral-600 mr-2">[{formatTimestamp(log.timestamp)}]</span>{log.text}
                             </div>
                         ))
@@ -390,6 +405,37 @@ export function ConsolePage() {
                     </div>
                 )}
             </div>
+
+            <Modal open={showKillConfirm} onClose={() => setShowKillConfirm(false)} title="Confirm Kill">
+                <div className="space-y-4">
+                    <div className="text-sm text-neutral-700 dark:text-neutral-300" style={{ fontFamily: "'Space Mono', monospace" }}>
+                        Are you sure you want to kill this server? This force-stops the container immediately.
+                    </div>
+
+                    <div className="bg-neutral-50 dark:bg-neutral-900/50 border border-neutral-300 dark:border-neutral-800/50 p-3">
+                        <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-600 dark:text-neutral-500" style={{ fontFamily: "'Space Mono', monospace" }}>
+                            Target
+                        </div>
+                        <div className="mt-1 text-xs text-neutral-900 dark:text-neutral-100" style={{ fontFamily: "'Space Mono', monospace" }}>
+                            {server.name} ({server.containerId?.slice(0, 12) || 'N/A'})
+                        </div>
+                    </div>
+
+                    <div className="flex justify-end gap-2 pt-2">
+                        <Button variant="ghost" onClick={() => setShowKillConfirm(false)} style={{ fontFamily: "'Space Mono', monospace" }}>
+                            Cancel
+                        </Button>
+                        <Button
+                            onClick={handleKillConfirm}
+                            disabled={!!powerLoading || isOffline}
+                            className="bg-red-800 hover:bg-red-900 disabled:bg-neutral-300 dark:disabled:bg-neutral-800 disabled:text-neutral-500 text-white border-transparent"
+                            style={{ fontFamily: "'Space Mono', monospace" }}
+                        >
+                            Confirm Kill
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
         </div>
     )
 }

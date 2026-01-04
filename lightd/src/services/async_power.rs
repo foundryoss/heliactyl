@@ -229,7 +229,7 @@ impl AsyncPowerManager {
                 action: "restart".to_string(),
             }).await;
 
-            hub.broadcast_message(&cid, "Stopping container...").await;
+            hub.broadcast_message(&cid, &format!("{}@pkg.lat: Stopping container...", &cid)).await;
             
             // Stop first (ignore errors - container might not be running)
             let _ = Self::do_stop(&docker, &cid).await;
@@ -237,7 +237,7 @@ impl AsyncPowerManager {
             // Small delay to ensure container is fully stopped
             tokio::time::sleep(Duration::from_millis(500)).await;
             
-            hub.broadcast_message(&cid, "Starting container...").await;
+            hub.broadcast_message(&cid, &format!("{}@pkg.lat: Starting container...", &cid)).await;
             
             // Start
             let result = Self::do_start(&docker, &cid).await;

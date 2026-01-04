@@ -241,6 +241,31 @@ impl FilesystemManagerDirect {
         Ok(())
     }
 
+    /// Copy a file (byte-safe).
+    ///
+    /// This intentionally copies bytes on the host volume instead of reading as UTF-8.
+    pub fn copy_file(&self, container_id: &str, source_path: &str, dest_path: &str) -> anyhow::Result<()> {
+        info!("Copying {} to {} in container {}", source_path, dest_path, container_id);
+
+        let source_host_path = self.get_volume_path(container_id, source_path)?;
+        let dest_host_path = self.get_volume_path(container_id, dest_path)?;
+
+        if !source_host_path.exists() {
+            return Err(anyhow::anyhow!("Source path does not exist"));
+        }
+
+        if !source_host_path.is_file() {
+            return Err(anyhow::anyhow!("Source path is not a file"));
+        }
+
+        if let Some(parent) = dest_host_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::copy(&source_host_path, &dest_host_path)?;
+        Ok(())
+    }
+
     /// Create directory
     pub fn create_directory(&self, container_id: &str, path: &str) -> anyhow::Result<()> {
         info!("Creating directory {} in container {}", path, container_id);

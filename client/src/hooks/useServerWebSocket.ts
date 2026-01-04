@@ -1,11 +1,82 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { useServerStore } from '@/state/server'
 
+export type WebConsoleLogType = 'stdout' | 'info' | 'error' | 'success' | 'status' | 'muted'
+
 interface UseServerWebSocketOptions {
-    onLog?: (text: string, type: 'stdout' | 'info' | 'error' | 'success' | 'status') => void
+    onLog?: (text: string, type: WebConsoleLogType) => void
     tenantId: string | null
     serverId: string | null
     api: any
+}
+
+function stripAnsi(input: string): string {
+    // Basic SGR sequences: \x1b[...m
+    return input.replace(/\u001b\[[0-9;]*m/g, '')
+}
+
+function normalizeLogPrefixes(input: string): string {
+    let output = input
+
+    // Remove leading HH:MM:SS timestamp
+    output = output.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '')
+
+    // Remove repeated "[something]: " prefixes (e.g. [container@pkg.lat]: ...)
+    while (true) {
+        const match = output.match(/^\[[^\]]+\]:\s*/)
+        if (!match) break
+        output = output.slice(match[0].length)
+    }
+
+    // Remove old literal daemon tag if present
+    output = output.replace(/^\[daemon\]\s*/i, '')
+
+    // Remove "container@pkg.lat:" style prefixes
+    output = output.replace(/^[^:\s]+@pkg\.lat:\s*/i, '')
+
+    return output
+}
+
+function inferLogTypeFromText(text: string): WebConsoleLogType {
+    const trimmed = text.trimStart()
+    const lower = trimmed.toLowerCase()
+
+    // Stack traces / call sites
+    if (/^at\s+/.test(trimmed) || /^\.{3}\s*\d+\s*more$/.test(trimmed) || lower.startsWith('caused by:')) {
+        return 'muted'
+    }
+
+    // Errors
+    if (
+        /^error:\s*/i.test(trimmed) ||
+        lower.includes('module_not_found') ||
+        lower.includes('unhandled') ||
+        lower.includes('exception') ||
+        lower.includes('traceback')
+    ) {
+        return 'error'
+    }
+
+    // Warnings / status-ish
+    if (/^status:\s*/i.test(trimmed) || /^warn(ing)?:\s*/i.test(trimmed)) {
+        return 'status'
+    }
+
+    return 'stdout'
+}
+
+function parseConsoleLine(raw: string, sourceHint?: 'daemon' | 'container'): { text: string; type: WebConsoleLogType } {
+    const normalizedNewlines = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const noAnsi = stripAnsi(normalizedNewlines)
+    const withoutPrefixes = normalizeLogPrefixes(noAnsi).trimEnd()
+
+    let type = inferLogTypeFromText(withoutPrefixes)
+    if (sourceHint === 'daemon' && (type === 'stdout' || type === 'info' || type === 'muted')) {
+        type = 'status'
+    }
+
+    const text = sourceHint === 'daemon' ? `[Lightd] ${withoutPrefixes}` : withoutPrefixes
+    return { text, type }
 }
 
 export function useServerWebSocket({ onLog, tenantId, serverId, api }: UseServerWebSocketOptions) {
@@ -66,7 +137,10 @@ export function useServerWebSocket({ onLog, tenantId, serverId, api }: UseServer
                     
                 case 'console_output':
                     if (data.args?.[0]) {
-                        onLogRef.current?.(data.args[0], 'stdout')
+                        const parsed = parseConsoleLine(String(data.args[0]), 'container')
+                        if (parsed.text) {
+                            onLogRef.current?.(parsed.text, parsed.type)
+                        }
                     }
                     break
                     
@@ -74,7 +148,7 @@ export function useServerWebSocket({ onLog, tenantId, serverId, api }: UseServer
                     if (data.args?.[0]) {
                         const newStatus = data.args[0]
                         setStatus(newStatus)
-                        onLogRef.current?.(`Status: ${newStatus}`, 'status')
+                        onLogRef.current?.(`[Lightd] Status: ${String(newStatus).toUpperCase()}`, 'status')
                         
                         // Reset stats when container stops
                         if (['stopped', 'offline', 'exited', 'killed'].includes(newStatus)) {
@@ -102,7 +176,10 @@ export function useServerWebSocket({ onLog, tenantId, serverId, api }: UseServer
                     
                 case 'daemon_message':
                     if (data.args?.[0]) {
-                        onLogRef.current?.(`[daemon] ${data.args[0]}`, 'info')
+                        const parsed = parseConsoleLine(String(data.args[0]), 'daemon')
+                        if (parsed.text) {
+                            onLogRef.current?.(parsed.text, parsed.type)
+                        }
                     }
                     break
                     
@@ -119,7 +196,10 @@ export function useServerWebSocket({ onLog, tenantId, serverId, api }: UseServer
             }
         } catch (e) {
             // If not JSON, treat as raw log output
-            onLogRef.current?.(event.data, 'stdout')
+            const parsed = parseConsoleLine(String(event.data), 'container')
+            if (parsed.text) {
+                onLogRef.current?.(parsed.text, parsed.type)
+            }
         }
     }, [setConnected, setConnecting, setStatus, setStats, addStatsToHistory])
 

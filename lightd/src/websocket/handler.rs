@@ -7,8 +7,10 @@
 use axum::extract::ws::{Message, WebSocket};
 use bollard::container::{LogOutput, LogsOptions, StatsOptions};
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use chrono::{DateTime, FixedOffset};
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::broadcast;
@@ -31,6 +33,65 @@ fn docker_since(secs_ago: u64) -> i64 {
         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[inline]
+fn epoch_secs_now() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+async fn is_container_running(docker: &bollard::Docker, container_id: &str) -> bool {
+    match tokio::time::timeout(Duration::from_secs(2), docker.inspect_container(container_id, None)).await {
+        Ok(Ok(info)) => info.state.and_then(|s| s.running).unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn parse_docker_timestamp_prefix(line: &str) -> (Option<i64>, &str) {
+    let Some((ts, rest)) = line.split_once(' ') else {
+        return (None, line);
+    };
+
+    match DateTime::<FixedOffset>::parse_from_rfc3339(ts) {
+        Ok(dt) => (Some(dt.timestamp()), rest),
+        Err(_) => (None, line),
+    }
+}
+
+struct RecentDedupe {
+    set: HashSet<String>,
+    order: VecDeque<String>,
+    max: usize,
+}
+
+impl RecentDedupe {
+    fn new(max: usize) -> Self {
+        Self {
+            set: HashSet::with_capacity(max.min(2048)),
+            order: VecDeque::with_capacity(max.min(2048)),
+            max,
+        }
+    }
+
+    fn seen_or_insert(&mut self, key: String) -> bool {
+        if self.set.contains(&key) {
+            return true;
+        }
+
+        self.set.insert(key.clone());
+        self.order.push_back(key);
+
+        while self.order.len() > self.max {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+
+        false
+    }
 }
 
 pub struct WebSocketHandler {
@@ -219,42 +280,177 @@ impl WebSocketHandler {
         event_hub: Arc<ContainerEventHub>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let opts = LogsOptions::<String> {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                since: docker_since(0),
-                timestamps: false,
-                ..Default::default()
-            };
+            // Keep trying to stream logs. Docker log streams can end/error during
+            // container crashes/restarts; this loop reconnects without requiring
+            // a separate state-change event.
+            let mut backoff = Duration::from_millis(250);
+            // Start slightly in the past to avoid missing immediate-exit output.
+            let mut last_since = docker_since(5);
 
-            let mut stream = docker.logs(&container_id, Some(opts));
+            let mut last_tail_poll: Option<SystemTime> = None;
+            let mut stopped_tail_sent = false;
+            let mut running_tail_sent = false;
+            let mut recent = RecentDedupe::new(1024);
 
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(log_output) => {
-                        let message_bytes = match log_output {
-                            LogOutput::StdOut { message } |
-                            LogOutput::StdErr { message } |
-                            LogOutput::Console { message } |
-                            LogOutput::StdIn { message } => message,
+            loop {
+                let running = is_container_running(&docker, &container_id).await;
+                if running {
+                    stopped_tail_sent = false;
+                } else {
+                    running_tail_sent = false;
+                }
+                if !running {
+                    let should_poll = match last_tail_poll {
+                        None => true,
+                        Some(t) => t.elapsed().unwrap_or(Duration::from_secs(0)) >= Duration::from_secs(1),
+                    };
+
+                    if should_poll {
+                        // Only include a tail once per stopped period; afterwards tail=0
+                        // to avoid re-sending the same last lines repeatedly.
+                        let tail = if stopped_tail_sent { "0" } else { "200" };
+                        // One-shot pull of recent logs, constrained by `since` and `tail`.
+                        let opts = LogsOptions::<String> {
+                            follow: false,
+                            stdout: true,
+                            stderr: true,
+                            since: (last_since - 1).max(0),
+                            timestamps: true,
+                            tail: tail.to_string(),
+                            ..Default::default()
                         };
 
-                        let message = String::from_utf8_lossy(&message_bytes);
-                        for line in message.lines() {
-                            let line = line.trim();
-                            if !line.is_empty() {
-                                event_hub.broadcast_console(&container_id, line).await;
+                        let mut poll_stream = docker.logs(&container_id, Some(opts));
+                        while let Some(result) = poll_stream.next().await {
+                            match result {
+                                Ok(log_output) => {
+                                    last_tail_poll = Some(SystemTime::now());
+
+                                    let message_bytes = match log_output {
+                                        LogOutput::StdOut { message } |
+                                        LogOutput::StdErr { message } |
+                                        LogOutput::Console { message } |
+                                        LogOutput::StdIn { message } => message,
+                                    };
+                                    let message = String::from_utf8_lossy(&message_bytes);
+                                    for line in message.lines() {
+                                        let line = line.trim();
+                                        if line.is_empty() {
+                                            continue;
+                                        }
+
+                                        let (ts, content) = parse_docker_timestamp_prefix(line);
+                                        if let Some(ts) = ts {
+                                            last_since = ts;
+                                        } else {
+                                            last_since = epoch_secs_now();
+                                        }
+
+                                        let content = content.trim();
+                                        if content.is_empty() {
+                                            continue;
+                                        }
+
+                                        let key = if let Some(ts) = ts {
+                                            format!("{}|{}", ts, content)
+                                        } else {
+                                            content.to_string()
+                                        };
+
+                                        if !recent.seen_or_insert(key) {
+                                            backoff = Duration::from_millis(250);
+                                            event_hub.broadcast_console(&container_id, content).await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    debug!("Log poll error for {}: {}", container_id, e);
+                                    break;
+                                }
                             }
                         }
+
+                        stopped_tail_sent = true;
                     }
-                    Err(e) => {
-                        debug!("Log stream error for {}: {}", container_id, e);
-                        break;
+
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+
+                // Running: follow logs. Only send a tail once per running period.
+                let tail = if running_tail_sent { "0" } else { "200" };
+                let opts = LogsOptions::<String> {
+                    follow: true,
+                    stdout: true,
+                    stderr: true,
+                    since: (last_since - 1).max(0),
+                    timestamps: true,
+                    tail: tail.to_string(),
+                    ..Default::default()
+                };
+
+                let mut stream = docker.logs(&container_id, Some(opts));
+                let mut saw_any = false;
+
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(log_output) => {
+                            saw_any = true;
+                            backoff = Duration::from_millis(250);
+                            last_tail_poll = Some(SystemTime::now());
+
+                            let message_bytes = match log_output {
+                                LogOutput::StdOut { message } |
+                                LogOutput::StdErr { message } |
+                                LogOutput::Console { message } |
+                                LogOutput::StdIn { message } => message,
+                            };
+
+                            let message = String::from_utf8_lossy(&message_bytes);
+                            for line in message.lines() {
+                                let line = line.trim();
+                                if line.is_empty() {
+                                    continue;
+                                }
+
+                                let (ts, content) = parse_docker_timestamp_prefix(line);
+                                if let Some(ts) = ts {
+                                    last_since = ts;
+                                } else {
+                                    last_since = epoch_secs_now();
+                                }
+
+                                let content = content.trim();
+                                if content.is_empty() {
+                                    continue;
+                                }
+
+                                let key = if let Some(ts) = ts {
+                                    format!("{}|{}", ts, content)
+                                } else {
+                                    content.to_string()
+                                };
+
+                                if !recent.seen_or_insert(key) {
+                                    event_hub.broadcast_console(&container_id, content).await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Log stream error for {}: {}", container_id, e);
+                            break;
+                        }
                     }
                 }
+
+                if saw_any {
+                    running_tail_sent = true;
+                }
+
+                // Stream ended (or errored). Reconnect after a brief backoff.
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(5));
             }
-            debug!("Log streamer ended for {}", container_id);
         })
     }
 
@@ -264,58 +460,71 @@ impl WebSocketHandler {
         event_hub: Arc<ContainerEventHub>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let opts = StatsOptions { stream: true, one_shot: false };
-            let mut stream = docker.stats(&container_id, Some(opts));
+            // Same resilience approach as logs: stats streams can end on restarts.
+            let mut backoff = Duration::from_millis(250);
             let start_time = std::time::Instant::now();
 
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(stats) => {
-                        let cpu_stats = &stats.cpu_stats;
-                        let precpu_stats = &stats.precpu_stats;
-                        
-                        let cpu_delta = cpu_stats.cpu_usage.total_usage
-                            .saturating_sub(precpu_stats.cpu_usage.total_usage);
-                        let system_delta = cpu_stats.system_cpu_usage.unwrap_or(0)
-                            .saturating_sub(precpu_stats.system_cpu_usage.unwrap_or(0));
-                        let num_cpus = cpu_stats.online_cpus.unwrap_or(1) as f64;
+            loop {
+                if !is_container_running(&docker, &container_id).await {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
 
-                        let cpu_percent = if system_delta > 0 && num_cpus > 0.0 {
-                            ((cpu_delta as f64 / system_delta as f64) * num_cpus * 100.0 * 100.0).round() / 100.0
-                        } else {
-                            0.0
-                        };
+                let opts = StatsOptions { stream: true, one_shot: false };
+                let mut stream = docker.stats(&container_id, Some(opts));
 
-                        let memory_usage = stats.memory_stats.usage.unwrap_or(0);
-                        let memory_limit = stats.memory_stats.limit.unwrap_or(0);
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(stats) => {
+                            backoff = Duration::from_millis(250);
+                            let cpu_stats = &stats.cpu_stats;
+                            let precpu_stats = &stats.precpu_stats;
 
-                        let (rx_bytes, tx_bytes) = stats.networks.as_ref()
-                            .map(|networks| {
-                                networks.values().fold((0u64, 0u64), |(rx, tx), net| {
-                                    (rx + net.rx_bytes, tx + net.tx_bytes)
+                            let cpu_delta = cpu_stats.cpu_usage.total_usage
+                                .saturating_sub(precpu_stats.cpu_usage.total_usage);
+                            let system_delta = cpu_stats.system_cpu_usage.unwrap_or(0)
+                                .saturating_sub(precpu_stats.system_cpu_usage.unwrap_or(0));
+                            let num_cpus = cpu_stats.online_cpus.unwrap_or(1) as f64;
+
+                            let cpu_percent = if system_delta > 0 && num_cpus > 0.0 {
+                                ((cpu_delta as f64 / system_delta as f64) * num_cpus * 100.0 * 100.0).round() / 100.0
+                            } else {
+                                0.0
+                            };
+
+                            let memory_usage = stats.memory_stats.usage.unwrap_or(0);
+                            let memory_limit = stats.memory_stats.limit.unwrap_or(0);
+
+                            let (rx_bytes, tx_bytes) = stats.networks.as_ref()
+                                .map(|networks| {
+                                    networks.values().fold((0u64, 0u64), |(rx, tx), net| {
+                                        (rx + net.rx_bytes, tx + net.tx_bytes)
+                                    })
                                 })
-                            })
-                            .unwrap_or((0, 0));
+                                .unwrap_or((0, 0));
 
-                        let uptime = start_time.elapsed().as_secs();
+                            let uptime = start_time.elapsed().as_secs();
 
-                        event_hub.broadcast_stats(&container_id, EventContainerStats {
-                            memory_bytes: memory_usage,
-                            memory_limit_bytes: memory_limit,
-                            cpu_percent,
-                            network_rx_bytes: rx_bytes,
-                            network_tx_bytes: tx_bytes,
-                            uptime,
-                            disk_bytes: 0,
-                        }).await;
-                    }
-                    Err(e) => {
-                        debug!("Stats stream error for {}: {}", container_id, e);
-                        break;
+                            event_hub.broadcast_stats(&container_id, EventContainerStats {
+                                memory_bytes: memory_usage,
+                                memory_limit_bytes: memory_limit,
+                                cpu_percent,
+                                network_rx_bytes: rx_bytes,
+                                network_tx_bytes: tx_bytes,
+                                uptime,
+                                disk_bytes: 0,
+                            }).await;
+                        }
+                        Err(e) => {
+                            debug!("Stats stream error for {}: {}", container_id, e);
+                            break;
+                        }
                     }
                 }
+
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(5));
             }
-            debug!("Stats streamer ended for {}", container_id);
         })
     }
 

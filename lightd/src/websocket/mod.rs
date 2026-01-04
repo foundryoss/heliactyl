@@ -59,7 +59,7 @@ impl WsMessage {
     pub fn console_output(line: &str) -> Self {
         Self {
             event: WsEvent::ConsoleOutput,
-            args: vec![line.to_string()],
+            args: vec!["[container@pkg.lat]: ".to_string() + line],
         }
     }
 
@@ -72,6 +72,7 @@ impl WsMessage {
     }
 
     /// Create error message
+    /// not in use.
     pub fn error(msg: &str) -> Self {
         Self {
             event: WsEvent::Error,
@@ -83,11 +84,12 @@ impl WsMessage {
     pub fn daemon_message(msg: &str) -> Self {
         Self {
             event: WsEvent::DaemonMessage,
-            args: vec![msg.to_string()],
+            args: vec!["[container@pkg.lat]: ".to_string() + msg],
         }
     }
 
     /// Create stats message with container resource usage (JSON string)
+    /// not in use
     pub fn stats_json(stats_json: &str) -> Self {
         Self {
             event: WsEvent::Stats,

@@ -306,13 +306,8 @@ pub async fn copy_file(
         let result = if is_move {
             manager.rename(&uuid_clone, &source_clone, &dest_clone)
         } else {
-            // For copy, read and write
-            match manager.get_file_content(&uuid_clone, &source_clone) {
-                Ok(content) => {
-                    manager.write_file(&uuid_clone, &dest_clone, &content)
-                }
-                Err(e) => Err(e)
-            }
+            // For copy, use byte-safe filesystem copy (supports tar.gz, zip, etc.)
+            manager.copy_file(&uuid_clone, &source_clone, &dest_clone)
         };
         
         if let Err(e) = result {
